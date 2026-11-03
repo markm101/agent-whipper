@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Agent card A, every state</title>
+<style>
+  :root {
+    --canvas: #111113; --surface: #1a1a1d; --raised: #26262a;
+    --ink-1: rgba(255,255,255,.05); --ink-2: rgba(255,255,255,.07); --ink-3: rgba(255,255,255,.1); --ink-4: rgba(255,255,255,.13); --ink-5: rgba(255,255,255,.2);
+    --line: rgba(255,255,255,.08);
+    --text: #9d9da1; --strong: #ececee; --faint: #85858b;
+    --accent: #22b8d8; --accent-soft: color-mix(in srgb, #22b8d8 16%, transparent); --accent-text: color-mix(in srgb, #22b8d8 70%, #fff);
+    --success: #22c55e; --success-soft: rgba(34,197,94,.16); --success-text: #4ade80;
+    --danger: #ef4444; --danger-soft: rgba(239,68,68,.16); --danger-text: #f87171;
+    --warning: #f59e0b; --warning-soft: rgba(245,158,11,.18); --warning-text: #fbbf24;
+    --mono: ui-monospace, 'SF Mono', Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--canvas); color: var(--text); font: 12px/1.35 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
+  .sheet { width: 1490px; padding: 36px 40px 44px; }
+  h1 { margin: 0; font-size: 22px; font-weight: 600; color: var(--strong); letter-spacing: -.01em; }
+  .lede { margin: 8px 0 0; max-width: 900px; font-size: 14px; color: var(--text); }
+  .grid { display: grid; grid-template-columns: 96px repeat(4, 300px); column-gap: 28px; row-gap: 20px; margin-top: 30px; }
+  .colhead { padding-bottom: 4px; }
+  .colhead b { display: block; font-size: 15px; font-weight: 600; color: var(--strong); }
+  .colhead span { display: block; margin-top: 5px; font-size: 12.5px; color: var(--text); }
+  .rowhead { padding-top: 16px; font-size: 12px; font-weight: 600; color: var(--faint); text-transform: none; }
+  .card { background: var(--surface); border-radius: 10px; box-shadow: 0 0 0 1px rgba(255,255,255,.05); padding: 14px 16px 16px; }
+  .strong { color: var(--strong); }
+  .f { color: var(--faint); }
+  .mono { font-family: var(--mono); font-size: 11px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .dot.accent { background: var(--accent); } .dot.success { background: var(--success); } .dot.danger { background: var(--danger); }
+  .row { display: flex; align-items: center; gap: 8px; }
+  .right { margin-left: auto; }
+  .chip { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 999px; font-size: 11px; font-weight: 500; white-space: nowrap; }
+  .chip.warn { background: var(--warning-soft); color: var(--warning-text); }
+  .chip.ok { background: var(--success-soft); color: var(--success-text); }
+  .callout { margin-top: 12px; padding: 8px 10px; border-radius: 7px; font-size: 12px; line-height: 1.4; }
+  .callout.danger { background: var(--danger-soft); color: var(--danger-text); }
+  .callout.warn { background: var(--warning-soft); color: var(--warning-text); }
+
+  /* A. Glance */
+  .a .name { font-size: 13px; font-weight: 600; color: var(--strong); }
+  .a .sub { margin-top: 3px; color: var(--faint); }
+  .a .metric, .c .metric { margin-top: 14px; font-size: 11px; color: var(--faint); }
+  .a .value { display: flex; align-items: baseline; gap: 6px; margin-top: 2px; }
+  .a .big { font-size: 24px; font-weight: 600; color: var(--strong); letter-spacing: -.01em; }
+  .a .value .unit { font-size: 13px; color: var(--faint); }
+  .a .value .goal { margin-left: auto; color: var(--faint); }
+  .a .bar { height: 6px; margin-top: 8px; border-radius: 3px; background: var(--ink-2); overflow: hidden; }
+  .a .bar span { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+  .a .bar.gray span { background: var(--ink-5); }
+  .a .bar.met span { background: var(--success); }
+  .a .under { margin-top: 6px; color: var(--faint); }
+  .a .blurb { margin-top: 14px; color: var(--text); }
+
+  /* B. Headline */
+  .b .top { display: flex; color: var(--faint); }
+  .b .head { margin-top: 10px; font-size: 15px; font-weight: 600; color: var(--strong); letter-spacing: -.005em; }
+  .b .head.danger { color: var(--danger-text); } .b .head.ok { color: var(--success-text); }
+  .b .line { margin-top: 4px; color: var(--text); }
+  .b .metric { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 11px; color: var(--faint); }
+  .b .stats { display: grid; grid-template-columns: 1fr 1fr 1.5fr; gap: 12px; margin-top: 8px; }
+  .b .stats label { display: block; font-size: 11px; color: var(--faint); }
+  .b .stats b { display: block; margin-top: 3px; font-size: 14px; font-weight: 600; color: var(--strong); white-space: nowrap; }
+
+  /* C. Track */
+  .c .name { font-size: 13px; font-weight: 600; color: var(--strong); }
+  .c .value { display: flex; align-items: baseline; gap: 6px; margin-top: 2px; }
+  .c .big { font-size: 24px; font-weight: 600; color: var(--strong); letter-spacing: -.01em; }
+  .c .value .unit { font-size: 13px; color: var(--faint); }
+  .c .value .goal { margin-left: auto; color: var(--faint); }
+  .c .track { position: relative; height: 34px; margin-top: 8px; }
+  .c .track .base { position: absolute; left: 0; right: 0; top: 16px; height: 2px; background: var(--ink-3); }
+  .c .track .done { position: absolute; left: 0; top: 16px; height: 2px; background: var(--accent); }
+  .c .track .done.met { background: var(--success); }
+  .c .track .tgt { position: absolute; top: 8px; width: 2px; height: 18px; margin-left: -1px; background: var(--strong); opacity: .7; }
+  .c .track .pt { position: absolute; top: 13px; width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; box-sizing: border-box; }
+  .c .pt.win { background: var(--accent); } .c .pt.flat { border: 1.5px solid var(--faint); background: var(--surface); } .c .pt.fail { background: var(--danger); }
+  .c .pt.best { width: 12px; height: 12px; top: 11px; margin-left: -6px; box-shadow: 0 0 0 3px var(--surface), 0 0 0 4.5px var(--accent); }
+  .c .pt.best.met { background: var(--success); box-shadow: 0 0 0 3px var(--surface), 0 0 0 4.5px var(--success); }
+  .c .scale { display: flex; justify-content: space-between; color: var(--faint); font-size: 11px; }
+  .c .scale--placed { position: relative; height: 15px; }
+  .c .scale--placed .at { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+  .c .foot { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--text); }
+  .c .foot.danger { color: var(--danger-text); }
+
+  /* D. Sections */
+  .d .head { display: flex; align-items: center; gap: 8px; }
+  .d .head .name { font-size: 13px; font-weight: 600; color: var(--strong); }
+  .d dl { display: grid; grid-template-columns: 58px 1fr; gap: 8px 10px; margin: 14px 0 0; }
+  .d dt { color: var(--faint); }
+  .d dd { margin: 0; color: var(--strong); }
+  .d dd .f { margin-left: 4px; }
+  .d dd.danger { color: var(--danger-text); } .d dd.warn { color: var(--warning-text); } .d dd.ok { color: var(--success-text); }
+  .d .mini { display: inline-block; width: 64px; height: 4px; margin: 0 0 2px 6px; border-radius: 2px; background: var(--ink-2); vertical-align: middle; overflow: hidden; }
+  .d .mini span { display: block; height: 100%; background: var(--accent); }
+  .d .mini.met span { background: var(--success); }
+  .d .mini.gray span { background: var(--ink-5); }
+  .grid-a { display: grid; grid-template-columns: repeat(3, 300px); gap: 28px 28px; margin-top: 28px; }
+  .cell b.state { display: block; margin-bottom: 10px; font-size: 13px; font-weight: 600; color: var(--strong); }
+  .cell span.when { display: block; margin: -6px 0 10px; font-size: 12px; color: var(--faint); }
+  .dot.warning { background: var(--warning); } .dot.idle { background: var(--ink-5); }
+  .a .bar.warning span { background: var(--warning); }
+  .a .big.none { font-size: 15px; font-weight: 500; color: var(--faint); white-space: nowrap; }
+  .a .value .goal { white-space: nowrap; }
+  .dot.busy { width: 10px; height: 10px; margin: -1px; border: 2px solid var(--accent-soft); border-top-color: var(--accent); background: none; transform: rotate(45deg); }
+  .order { margin: 18px 0 0; padding-left: 18px; font-size: 13px; color: var(--text); columns: 2; column-gap: 40px; max-width: 900px; }
+  .order li { margin-bottom: 4px; }
+  .sheet { width: 1060px; }
+</style>
+</head>
+<body>
+<div class="sheet">
+  <h1>Agent card A: every state</h1>
+  <p class="lede">Every card has the same lines in the same order, so your eye finds each one in the same place. A state can change a color or a word, and it can add one callout at the bottom. It never removes a line.</p>
+  <ol class="order">
+    <li>Status dot, agent, and time left or state</li>
+    <li>Project and module</li>
+    <li>Metric</li>
+    <li>Best value and target</li>
+    <li>Progress bar</li>
+    <li>How far along, or what it is waiting for</li>
+    <li>The agent's blurb, always</li>
+    <li>A callout, only when something needs reading</li>
+  </ol>
+  <div class="grid-a">
+<div class="cell"><b class="state">Active</b><span class="when">An attempt is with the runner, so the dot spins</span><div class="card a">
+      <div class="row"><span class="dot busy" title="{attempt} verifying"></span><span class="name">{agent}</span><span class="right f">{minutes} min left</span></div>
+      <div class="sub">{project} · {module name}</div>
+      <div class="metric">{metric}</div>
+      <div class="value"><span class="big">{best}</span><span class="unit">{unit}</span><span class="goal">target {target}</span></div>
+      <div class="bar"><span style="width: 51%"></span></div>
+      <div class="under row"><span>{progress}% of the way from {baseline}</span></div>
+      <div class="blurb">{blurb}</div>
+    </div></div>
+<div class="cell"><b class="state">Grace period</b><span class="when">The deadline passed, one attempt left</span><div class="card a">
+      <div class="row"><span class="dot warning"></span><span class="name">{agent}</span><span class="right" style="color: var(--warning-text)">Time is up</span></div>
+      <div class="sub">{project} · {module name}</div>
+      <div class="metric">{metric}</div>
+      <div class="value"><span class="big">{best}</span><span class="unit">{unit}</span><span class="goal">target {target}</span></div>
+      <div class="bar"><span style="width: 38%"></span></div>
+      <div class="under row"><span>{progress}% of the way from {baseline}</span></div>
+      <div class="blurb">{blurb}</div>
+      <div class="callout warn">1 attempt left. The module times out in {grace minutes} min.</div>
+    </div></div>
+<div class="cell"><b class="state">Pending</b><span class="when">Waiting for its verifiers or its baseline</span><div class="card a">
+      <div class="row"><span class="dot idle"></span><span class="name">{agent}</span><span class="right f">Not started</span></div>
+      <div class="sub">{project} · {module name}</div>
+      <div class="metric">{metric}</div>
+      <div class="value"><span class="big none">Not measured yet</span><span class="goal">target {targetGain}%</span></div>
+      <div class="bar"><span style="width: 0%"></span></div>
+      <div class="under row"><span>Waiting for {verifiers or baseline}</span></div>
+      <div class="blurb">{blurb}</div>
+    </div></div>
+<div class="cell"><b class="state">Stuck</b><span class="when">A step failed its 3rd turn</span><div class="card a">
+      <div class="row"><span class="dot danger"></span><span class="name">{agent}</span><span class="right" style="color: var(--danger-text)">Stuck</span></div>
+      <div class="sub">{project} · {module name}</div>
+      <div class="metric">{metric}</div>
+      <div class="value"><span class="big">{best}</span><span class="unit">{unit}</span><span class="goal">target {target}</span></div>
+      <div class="bar gray"><span style="width: 56%"></span></div>
+      <div class="under row"><span>{progress}% of the way from {baseline}</span></div>
+      <div class="blurb">{blurb}</div>
+      <div class="callout danger">Step {step} failed 3 times. The agent has to abandon it with a reason.</div>
+    </div></div>
+<div class="cell"><b class="state">Past target, with a flag</b><span class="when">On a streak, still improving</span><div class="card a">
+      <div class="row"><span class="dot success"></span><span class="name">{agent}</span><span class="right f">{minutes} min left</span></div>
+      <div class="sub">{project} · {module name}</div>
+      <div class="metric">{metric}</div>
+      <div class="value"><span class="big">{best}</span><span class="unit">{unit}</span><span class="goal">target {target}</span></div>
+      <div class="bar met"><span style="width: 100%"></span></div>
+      <div class="under row"><span>Past target by {beyond}%</span><span class="chip ok right">{streak} in a row</span></div>
+      <div class="blurb">{blurb}</div>
+      <div class="callout warn">{flags} to review: {latest flag}</div>
+    </div></div>
+<div class="cell"><b class="state">Passed</b><span class="when">The module met its target and ended</span><div class="card a">
+      <div class="row"><span class="dot success"></span><span class="name">{agent}</span><span class="right" style="color: var(--success-text)">Passed</span></div>
+      <div class="sub">{project} · {module name}</div>
+      <div class="metric">{metric}</div>
+      <div class="value"><span class="big">{best}</span><span class="unit">{unit}</span><span class="goal">target {target}</span></div>
+      <div class="bar met"><span style="width: 100%"></span></div>
+      <div class="under row"><span>Met its target, next: {next module}</span></div>
+      <div class="blurb">{blurb}</div>
+    </div></div>
+  </div>
+</div>
+</body>
+</html>
