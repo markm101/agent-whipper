@@ -27,18 +27,33 @@ To reach the server from other machines, put it behind a TLS proxy and set `WHIP
 
 Give each agent the instructions in [`docs/agent-guide.md`](docs/agent-guide.md), with its agent ID, the server's address, and the agent token.
 
-`scripts/whip-hook.sh` prints the agent's board line for a hook to add to its context. It needs `WHIP_URL`, `WHIP_AGENT_ID`, and `WHIP_AGENT_TOKEN`, and if the server is down it says so and lets the agent continue. In Claude Code, for example, add it to `.claude/settings.json`:
+`scripts/whip-hook.sh` prints the agent's board line for a hook to add to its context. It needs `WHIP_URL`, `WHIP_AGENT_ID`, and `WHIP_AGENT_TOKEN`, and if the server is down it says so and lets the agent continue. With no argument it prints plain text, which reaches the model only from `SessionStart` and `UserPromptSubmit`. Give it the event's name and it prints the JSON every other event needs, `hookSpecificOutput.additionalContext`.
+
+In Claude Code, add it to `.claude/settings.json`. `UserPromptSubmit` shows the line with each prompt, and `PostToolBatch` shows it again after each round of tool calls, so the agent sees it before every model request of a long autonomous run:
 
 ```json
 {
   "hooks": {
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "sh scripts/whip-hook.sh" }] }],
-    "PostToolUse": [{ "hooks": [{ "type": "command", "command": "sh scripts/whip-hook.sh" }] }]
+    "PostToolBatch": [{ "hooks": [{ "type": "command", "command": "sh scripts/whip-hook.sh PostToolBatch" }] }]
   }
 }
 ```
 
-Which hook event fires often enough during a long autonomous run is still to be tested.
+In Codex, add it to `.codex/hooks.json`. Codex has no batch event, so `PostToolUse` shows the line after each tool call, once per call when calls run in parallel:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "sh scripts/whip-hook.sh" }] }],
+    "PostToolUse": [{ "hooks": [{ "type": "command", "command": "sh scripts/whip-hook.sh PostToolUse" }] }]
+  }
+}
+```
+
+Codex runs a hook only once it's trusted, and `codex exec` skips untrusted hooks without a warning. Review them in the interactive `codex`, or pass `--dangerously-bypass-hook-trust` to `codex exec`.
+
+These choices come from runs of more than 20 tool calls on Claude Code 2.1.314 and Codex CLI 0.165.0. `PreToolUse` and `PostToolUse` also reach the model in both, but only as JSON, and Claude Code's `PostToolUse` fires once per call where `PostToolBatch` fires once per round. Codex's `PreModelRequest` fires before every model request, but Codex drops its output.
 
 ## The API
 

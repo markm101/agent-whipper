@@ -6,7 +6,7 @@ Every call carries the agent token. In the examples, `$W` is the server's addres
 
 ## Your board line
 
-The hook shows you a line like this at the start of each turn:
+The hook shows you a line like this with each prompt and after each round of tool calls:
 
 ```
 agent 1: Project: search-perf, Module (2 / 5): query cache, Progress: 1 / 3, Blurb: Caching parsed queries. Goal: p95 latency 371 -> 334 ms, 10% lower. 38 min left.
