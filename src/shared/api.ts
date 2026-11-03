@@ -1,0 +1,163 @@
+// The dashboard's contract with the server: what GET /api/board and the
+// attempt detail call return. The server derives every judged number (best,
+// streak, deadline, gain, p), so the UI renders and never recomputes a verdict.
+
+declare const brand: unique symbol
+type Brand<T, B extends string> = T & { readonly [brand]: B }
+
+export type AgentId = Brand<string, 'AgentId'>
+export type ModuleId = Brand<string, 'ModuleId'>
+export type AttemptId = Brand<string, 'AttemptId'>
+export type Commit = Brand<string, 'Commit'>
+/** An ISO 8601 timestamp from the server's clock. */
+export type Iso = Brand<string, 'Iso'>
+
+export type Verdict = 'win' | 'flat' | 'fail'
+export type Direction = 'lower' | 'higher'
+
+export interface Goal {
+  metric: string
+  unit: string
+  direction: Direction
+  /** Percent of the baseline. */
+  targetGain: number
+  /** Percent of the best commit's median. */
+  minGain: number
+  ambitious: boolean
+  /** Null until the baseline job lands. */
+  baseline: number | null
+  /** The baseline improved by targetGain. Null until the baseline lands. */
+  target: number | null
+}
+
+export interface Step {
+  title: string
+  done: boolean
+  failedTurns: number
+}
+
+export type JobState = 'queued' | 'running' | 'done' | 'killed' | 'failed'
+
+export interface Attempt {
+  id: AttemptId
+  /** 1-based index into the module's steps. */
+  step: number
+  commit: Commit
+  note: string
+  job: JobState
+  verdict: Verdict | null
+  /** Median of the new commit's benchmark runs, once judged. */
+  median: number | null
+  postedAt: Iso
+  judgedAt: Iso | null
+}
+
+export interface Extension {
+  minutes: number
+  cause: 'streak' | 'win' | 'step'
+  at: Iso
+}
+
+/** Time a job spent waiting for a runner after the module became active. */
+export interface Wait {
+  at: Iso
+  minutes: number
+}
+
+/** `waitedMinutes` is the sum of `waits`; the list places each wait on the timeline. */
+export type Clock =
+  | { kind: 'notStarted' }
+  | { kind: 'running'; startedAt: Iso; deadline: Iso; maxMinutes: number; extensions: Extension[]; waits: Wait[]; waitedMinutes: number }
+  | { kind: 'grace'; startedAt: Iso; deadline: Iso; graceEnds: Iso; maxMinutes: number; extensions: Extension[]; waits: Wait[]; waitedMinutes: number }
+  | { kind: 'stopped'; startedAt: Iso | null; at: Iso; maxMinutes: number; extensions: Extension[]; waits: Wait[]; waitedMinutes: number }
+
+export type ModuleStatus =
+  | { state: 'pending'; waitingFor: 'turn' | 'verifiers' | 'baseline' }
+  | { state: 'active' }
+  | { state: 'pastTarget' }
+  | { state: 'stuck'; cause: 'step' | 'target' | 'time' }
+  | { state: 'passed' }
+  | { state: 'abandoned'; reason: string; followUp: ModuleId | null }
+
+export type Verifiers =
+  | { kind: 'missing' }
+  | { kind: 'frozen'; hash: string; tests: number; author: AgentId; hardware: string; openChanges: number }
+
+export type FlagKind = 'touchedVerifier' | 'fewerTests' | 'lessWork' | 'verdictWithoutJob' | 'selfAuthoredVerifiers' | 'baselineFailed'
+
+export interface Flag {
+  kind: FlagKind
+  attempt: AttemptId | null
+  detail: string
+  at: Iso
+}
+
+export interface Module {
+  id: ModuleId
+  /** 1-based position in the project. Shifts when a module is inserted; the ID never does. */
+  position: number
+  title: string
+  status: ModuleStatus
+  steps: Step[]
+  goal: Goal
+  verifiers: Verifiers
+  /** The best commit's median. Null before the baseline lands. */
+  best: number | null
+  bestCommit: Commit | null
+  headCommit: Commit | null
+  streak: number
+  /** Oldest first. */
+  attempts: Attempt[]
+  clock: Clock
+  retryOf: ModuleId | null
+  flags: Flag[]
+}
+
+export interface Project {
+  title: string
+  /** In position order. */
+  modules: Module[]
+  /** The module that is active, past target, or stuck, or else the next pending one. Null once the project ends. */
+  current: ModuleId | null
+}
+
+export interface Agent {
+  id: AgentId
+  /** The agent's own sentence, without the server-written parts. */
+  blurb: string
+  /** The plain-text board line the hook shows the agent. */
+  line: string
+  project: Project | null
+  /** Titles of projects waiting to start, in order. */
+  queued: string[]
+}
+
+export interface Board {
+  generatedAt: Iso
+  agents: Agent[]
+}
+
+export interface Run {
+  commit: Commit
+  value: number
+  work: number
+}
+
+export interface AttemptDetail {
+  agent: AgentId
+  module: ModuleId
+  attempt: Attempt
+  bestCommit: Commit
+  verifierHash: string
+  runner: string | null
+  tests: { passed: number; total: number } | null
+  /** In the order they ran, alternating between the best commit and the new one. */
+  runs: Run[]
+  /** Median of the best commit's runs in this job. The module's `best` can't stand in: it moves with later wins. */
+  bestMedian: number | null
+  /** Percent gain of the new median over the best median. */
+  gain: number | null
+  /** One-sided Mann-Whitney p-value. */
+  p: number | null
+  touchedVerifiers: string[]
+}
