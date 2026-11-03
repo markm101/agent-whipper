@@ -4,7 +4,7 @@
 import type { Agent, AgentId, Attempt, AttemptDetail, AttemptId, Board, ChangeId, Clock, Iso, JobId, Module, ModuleId, ModuleStatus, Verdict } from '../../shared/api.ts'
 import { boardLine } from '../../shared/boardLine.ts'
 import { currentOf, factsOf, failedTurns, firstInLine, locate, measured, verifiersOf, type Facts } from './queries.ts'
-import { MINUTE, iso, type AgentRec, type AttemptRec, type JobRec, type ModuleRec, type Ms, type ProjectRec, type World } from './records.ts'
+import { MINUTE, iso, type AgentRec, type AttemptRec, type JobRec, type ModuleRec, type Ms, type ProjectRec, type VerifierSet, type World } from './records.ts'
 
 const jobOf = (m: ModuleRec, x: AttemptRec) => m.jobs.find((j) => j.id === x.job)!
 
@@ -71,7 +71,17 @@ function moduleOf(p: ProjectRec, m: ModuleRec, now: Ms): Module {
     steps: m.steps.map((s, i) => ({ title: s.title, done: s.doneAt !== null, failedTurns: failedTurns(m, i + 1) })),
     goal: { ...m.goal, baseline: f.baseline, target: f.target },
     verifiers: v ? { kind: 'frozen', hash: v.hash, tests, author: v.author, hardware: v.hardware, openChanges: m.changes.filter((c) => c.state === 'open').length } : { kind: 'missing' },
-    changes: m.changes.map((c) => ({ id: c.id, author: c.author, reason: c.reason, files: c.changed, state: c.state, filedAt: iso(c.filedAt), decidedAt: c.decidedAt === null ? null : iso(c.decidedAt) })),
+    changes: m.changes.map((c) => ({
+      id: c.id,
+      author: c.author,
+      reason: c.reason,
+      files: c.changed,
+      state: c.state,
+      filedAt: iso(c.filedAt),
+      decidedAt: c.decidedAt === null ? null : iso(c.decidedAt),
+      note: c.note ?? null,
+      appliedTo: c.appliedTo ?? [],
+    })),
     best: f.bestValue,
     bestCommit: f.best,
     headCommit: f.head,
@@ -136,8 +146,13 @@ export interface AttemptStatus {
   failedTurns: number
   streak: number
   module: ModuleStatus
+  /** The project ends when this module does. */
+  lastModule: boolean
   line: string
 }
+
+/** Whether the project ends with this module: every other one has ended. */
+const isLast = (p: ProjectRec, m: ModuleRec) => p.modules.every((x) => x === m || x.state === 'passed' || x.state === 'abandoned')
 
 const pct = (n: number) => `${Math.abs(n) < 10 ? Math.abs(n).toFixed(1) : Math.round(Math.abs(n))}%`
 const pText = (p: number) => (p < 0.001 ? 'p < 0.001' : `p = ${p.toFixed(3)}`)
@@ -188,8 +203,20 @@ export function attemptStatusOf(w: World, agent: string, module: string, attempt
     failedTurns: failedTurns(m, x.step),
     streak: factsOf(p, m, now).streak,
     module: statusOf(p, m),
+    lastModule: isLast(p, m),
     line: agentView(a, now).line,
   }
+}
+
+/** GET /agents/{id}/modules/{m}: the module as the dashboard sees it, plus its verifiers' commands and files. */
+export type AgentModule = Module & { lastModule: boolean; commands: VerifierSet['commands'] | null; paths: string[]; image: string | null; timeLimitMinutes: number | null }
+
+export function agentModuleOf(w: World, agent: string, module: string, now: Ms): AgentModule | null {
+  const found = locate(w, agent, module)
+  if (!found) return null
+  const { p, m } = found
+  const v = verifiersOf(m)
+  return { ...moduleOf(p, m, now), lastModule: isLast(p, m), commands: v?.commands ?? null, paths: v?.paths ?? [], image: v?.image ?? null, timeLimitMinutes: v?.timeLimitMinutes ?? null }
 }
 
 /** GET /agents/{id}/modules/{m}/steps/{n}: a step, and what its latest check found. */
@@ -221,7 +248,12 @@ export function stepStatusOf(w: World, agent: string, module: string, n: number)
     if (r.outcome === 'killed') return 'The check ran past its time limit, so the step stays open.'
     if (r.outcome === 'badCommit') return "The runner couldn't fetch the head commit, so the step stays open."
     if (r.tests && r.tests.passed < r.tests.total) return `${r.tests.total - r.tests.passed} of ${r.tests.total} tests failed, so the step stays open.`
-    return step.held === false ? 'The tests passed and the step is done, but the metric got worse, so it earned no extension.' : 'The tests passed, the step is done, and the metric held.'
+    if (step.held === false) return 'The tests passed and the step is done, but the metric got worse, so it earned no extension.'
+    // A check on the same head commit as the step before it, or the start, did no new work
+    const earlier = m.steps.filter((x) => x !== step && x.doneAt !== null && x.doneAt <= step.doneAt!).sort((x, y) => x.doneAt! - y.doneAt!).at(-1)
+    const before = earlier?.commit ?? factsOf(p, m, step.doneAt ?? 0).start
+    if (step.commit && step.commit === before) return "The tests passed and the step is done. The head commit hadn't changed since the last step check, so it earned no extension."
+    return 'The tests passed, the step is done, and the metric held.'
   }
   return {
     step: n,
@@ -242,10 +274,22 @@ export interface ChangeStatus {
   reason: string
   filedAt: Iso
   decidedAt: Iso | null
+  /** The admin's note on the decision. */
+  note: string | null
+  appliedTo: ModuleId[]
 }
 
 export function changeOf(w: World, agent: string, module: string, change: string): ChangeStatus | null {
   const c = locate(w, agent, module)?.m.changes.find((x) => x.id === change)
   if (!c) return null
-  return { change: c.id, module: module as ModuleId, state: c.state, reason: c.reason, filedAt: iso(c.filedAt), decidedAt: c.decidedAt === null ? null : iso(c.decidedAt) }
+  return {
+    change: c.id,
+    module: module as ModuleId,
+    state: c.state,
+    reason: c.reason,
+    filedAt: iso(c.filedAt),
+    decidedAt: c.decidedAt === null ? null : iso(c.decidedAt),
+    note: c.note ?? null,
+    appliedTo: c.appliedTo ?? [],
+  }
 }

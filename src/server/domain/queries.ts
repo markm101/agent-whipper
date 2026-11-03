@@ -21,6 +21,9 @@ export const measured = (j: JobRec) => j.state === 'done' && !!j.results?.tests 
 /** The baseline job that started the module. */
 export const baselineJob = (m: ModuleRec): JobRec | null => m.jobs.find((j) => j.kind === 'baseline' && measured(j)) ?? null
 
+/** The latest measured baseline: the first, or one taken again after the module's verifiers changed. */
+export const latestBaseline = (m: ModuleRec): JobRec | null => m.jobs.findLast((j) => j.kind === 'baseline' && measured(j)) ?? null
+
 /** 0-based index of the first step not done; steps.length once all are done. */
 export function currentStepIndex(m: ModuleRec): number {
   const i = m.steps.findIndex((s) => s.doneAt === null)
@@ -99,12 +102,21 @@ export interface ExtensionRec {
  * first streak of 2 or the first finished step that holds the metric, then
  * half the previous to each later win or held step.
  */
-export function extensionsOf(m: ModuleRec): ExtensionRec[] {
+export function extensionsOf(m: ModuleRec, start: Commit | null = null): ExtensionRec[] {
   type Event = { at: Ms; attempt: boolean; win: boolean; held: boolean }
-  const events: Event[] = [
-    ...m.attempts.filter((a) => a.judged && a.judgedAt !== null).map((a) => ({ at: a.judgedAt!, attempt: true, win: a.judged!.verdict === 'win', held: false })),
-    ...m.steps.filter((s) => s.doneAt !== null).map((s) => ({ at: s.doneAt!, attempt: false, win: false, held: s.held === true })),
-  ].sort((x, y) => x.at - y.at)
+  // A finished step only counts if its check measured a different head commit than the step before it, or the start
+  let checked = start
+  const steps = m.steps
+    .filter((s) => s.doneAt !== null)
+    .sort((x, y) => x.doneAt! - y.doneAt!)
+    .map((s) => {
+      const changed = s.commit === undefined || s.commit === null || s.commit !== checked
+      if (s.commit) checked = s.commit
+      return { at: s.doneAt!, attempt: false, win: false, held: s.held === true && changed }
+    })
+  const events: Event[] = [...m.attempts.filter((a) => a.judged && a.judgedAt !== null).map((a) => ({ at: a.judgedAt!, attempt: true, win: a.judged!.verdict === 'win', held: false })), ...steps].sort(
+    (x, y) => x.at - y.at,
+  )
   const series = extensionSeries(m.maxMinutes)
   const out: ExtensionRec[] = []
   let run = 0
@@ -145,12 +157,18 @@ export interface Facts {
 export function factsOf(p: ProjectRec, m: ModuleRec, now: Ms): Facts {
   const start = startCommits(p)[p.modules.indexOf(m)] ?? null
   const win = lastWin(m)
-  const baselineRun = baselineJob(m)
-  const baseline = baselineRun ? median(baselineRun.results!.runs.map((r) => r.value)) : null
-  const startedAt = baselineRun?.finishedAt ?? null
+  // The clock starts at the first baseline; the numbers come from the latest, taken again when the verifiers change
+  const first = baselineJob(m)
+  const latest = latestBaseline(m)
+  const on = (c: Commit | null) => latest!.results!.runs.filter((r) => r.commit === c).map((r) => r.value)
+  const baseline = latest ? median(on(latest.commit)) : null
+  const startedAt = first?.finishedAt ?? null
+  // A re-measured baseline also measured the best commit, which stands until the next win
+  const remeasured = latest && latest.bestCommit && on(latest.bestCommit).length ? median(on(latest.bestCommit)) : null
+  const bestValue = win?.judged && win.judgedAt !== null && latest && win.judgedAt > latest.finishedAt! ? win.judged.median : (remeasured ?? win?.judged?.median ?? baseline)
   const waits = waitsOf(m, startedAt, now)
   const waited = waits.reduce((sum, w) => sum + w.minutes, 0)
-  const extensions = startedAt === null ? [] : extensionsOf(m)
+  const extensions = startedAt === null ? [] : extensionsOf(m, start)
   const extended = extensions.reduce((sum, e) => sum + e.minutes, 0)
   const deadline = startedAt === null ? null : startedAt + (m.maxMinutes + extended + waited) * MINUTE
   const last =
@@ -168,7 +186,7 @@ export function factsOf(p: ProjectRec, m: ModuleRec, now: Ms): Facts {
     head: headOf(m, start),
     baseline,
     target: baseline === null ? null : improve(baseline, m.goal.targetGain, m.goal.direction),
-    bestValue: win?.judged?.median ?? baseline,
+    bestValue,
     startedAt,
     waits,
     waited,

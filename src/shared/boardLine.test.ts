@@ -72,7 +72,13 @@ test('an ended project sums up what it did and where to start the next one', () 
     current: null,
     modules: [passed('m1', 1, 415, 371, 'a'.repeat(40)), { ...moduleWith({ id: 'm2' as ModuleId, position: 2 }), status: { state: 'abandoned', reason: 'x', followUp: null } }, passed('m3', 3, 371, 331, '9be1c04'.padEnd(40, '0'))],
   }
-  assert.equal(boardLine(a, now), 'agent 1: Project: search-perf ended: 2 passed, 1 abandoned. p95 latency 415 -> 331 ms. To keep climbing, create a new project from 9be1c04.')
+  // 415 -> 371 and 371 -> 331, chained, plus the abandoned module's 352 against its 371 baseline
+  assert.equal(boardLine(a, now), 'agent 1: Project: search-perf ended: 2 passed, 1 abandoned. p95 latency 24% lower overall. To keep climbing, create a new project from 9be1c04.')
+})
+
+test('small values keep three significant figures', () => {
+  const m = moduleWith({ goal: { ...moduleWith({}).goal, baseline: 4.49, target: 4.04 }, best: 3.81 })
+  assert.match(boardLine(agentWith(m), now), /Goal: p95 latency 4\.49 -> 4\.04 ms, 10% lower\. Best so far 3\.81 ms\./)
 })
 
 test('leaves the streak out below 2 wins and the numbers out before a baseline', () => {

@@ -27,7 +27,7 @@ Every board line has this format:
 agent {id}: Project: {title}, Module ({position} / {total}): {title}, Progress: {done steps} / {total steps}, Blurb: {blurb}
 ```
 
-The agent writes one sentence about what it is working on. The server appends the rest of the blurb from its own records: the goal and its metric, the best value once a win has moved it, the streak when there is one, a warning when the current module is the project's last, and the time left. So the blurb always matches what the server has measured. Once the project ends, the line sums it up instead: how many modules passed and were abandoned, the metric from the first baseline to the final best, and the commit a new project would start from.
+The agent writes one sentence about what it is working on. The server appends the rest of the blurb from its own records: the goal and its metric, the best value once a win has moved it, the streak when there is one, a warning when the current module is the project's last, and the time left. So the blurb always matches what the server has measured. Once the project ends, the line sums it up instead: how many modules passed and were abandoned, the metric's change over the project, and the commit a new project would start from. The change chains each module's gain on its own benchmark, so a benchmark changed partway can't skew it. Values under 100 show three significant figures, so small numbers still show progress.
 
 ```
 agent 1: Project: search-perf, Module (2 / 5): query cache, Progress: 3 / 7, Blurb: Caching parsed queries. Goal: p95 latency 371 -> 334 ms, 10% lower. Best so far 352 ms. 2 wins in a row. 38 min left.
@@ -81,8 +81,10 @@ Every module needs verifiers before it can start: tests that prove each step wor
 - Verifiers freeze when they are submitted. The server keeps the files and one verifier hash over the files, the container image, the commands, the hardware label, and the job time limit.
 - Each submission names its author, so the dashboard can flag verifiers written by the agent that works the module.
 - You can review verifiers on the dashboard and replace any of them. A replacement takes effect like an approved change.
-- An agent that finds a frozen verifier wrong files a change request, and you approve or reject it on the dashboard. The agent can read the request's state, and until you decide, the module keeps running on the old verifiers.
-- An approved change freezes the new files under a new hash. The change's edits apply to the verifiers as they are when you approve it, so approving one change never undoes another, and the verifiers keep their author. Jobs queued after that use them, and a job already in flight keeps the verifiers it was queued with. Every attempt job measures the best commit again, so later verdicts use the new verifiers on both commits. The baseline and the target stay as they were, earlier verdicts stand, and a change doesn't reopen a stuck module.
+- An agent that finds a frozen verifier wrong files a change request. You review its diff on the dashboard, and approve or reject it with an optional note. The agent can read the request's state and your note, and until you decide, the module keeps running on the old verifiers.
+- An approved change freezes the new files under a new hash. The change's edits apply to the verifiers as they are when you approve it, so approving one change never undoes another, and the verifiers keep their author. Jobs queued after that use them, and a job already in flight keeps the verifiers it was queued with. Every attempt job measures the best commit again, so later verdicts use the new verifiers on both commits. Earlier verdicts stand, and a change doesn't reopen a stuck module.
+- A change to an active or past-target module measures its baseline again on the new verifiers, on the start commit and the best commit, as soon as no job is in flight. The target keeps its `targetGain` on the new baseline, so a benchmark that reads on a different scale can't make the target trivial. The clock keeps running from the first baseline, and earned extensions and the streak stand. If that baseline job fails, the module keeps its old baseline and the dashboard flags it.
+- An approved change also reaches the project's modules that haven't started, when the files it changes are still what it was written against. Their baselines are then measured on the new verifiers from the start.
 
 ## A runner verifies every attempt
 
@@ -128,7 +130,7 @@ Each module gets `maxMinutes` of wall-clock time from when it becomes active. Th
 
 Conservative targets are often met while a module is still improving. A streak is a run of consecutive wins in one module, and a flat or failed attempt ends it.
 
-- **Extensions shrink.** The first extension is half the module's `maxMinutes`. It goes to the win that makes the module's first streak of 2, or to the first finished step that holds the metric, whichever comes first. After that, every win and every finished step that holds the metric earns half the previous extension. A finished step that makes the metric worse earns nothing. The series never restarts, and it stops once the next extension would be under 5 minutes.
+- **Extensions shrink.** The first extension is half the module's `maxMinutes`. It goes to the win that makes the module's first streak of 2, or to the first finished step that holds the metric, whichever comes first. After that, every win and every finished step that holds the metric earns half the previous extension. A finished step that makes the metric worse earns nothing, and so does one whose check measured the same head commit as the step before it, or the start commit: marking a step done without new work doesn't buy time. The series never restarts, and it stops once the next extension would be under 5 minutes.
 - **Past target.** A target met with steps after the current step left doesn't end the module, even on its first win. It goes past target, as the lifecycle describes.
 - **The blurb shows it.** While a streak lasts, the blurb says so, such as "2 wins in a row".
 
@@ -164,7 +166,9 @@ Agent calls carry the agent ID in the path and the agent token. Runner calls car
 | `POST /agents/{id}/modules` | agent | Adds a module with its steps and goal right after the current module, and returns its ID |
 | `POST /agents/{id}/modules/{m}/verifiers` | agent | Submits a module's verifiers, which freeze on submission |
 | `POST /agents/{id}/modules/{m}/verifiers/changes` | agent | Files a change request for a module's frozen verifiers |
-| `GET /agents/{id}/modules/{m}/verifiers/changes/{change}` | agent | Returns a change request's state |
+| `GET /agents/{id}/modules/{m}/verifiers/changes` | agent | Lists the module's change requests, with each decision's note |
+| `GET /agents/{id}/modules/{m}/verifiers/changes/{change}` | agent | Returns a change request's state and the admin's note |
+| `GET /agents/{id}/modules/{m}` | agent | Returns the module: its state, steps, goal, attempts, clock, change requests, and its verifiers' commands and files |
 | `POST /agents/{id}/modules/{m}/attempts` | agent | Queues an attempt from its `attemptId`, `commit`, and `note` |
 | `GET /agents/{id}/modules/{m}/attempts/{attemptId}` | agent | Returns the attempt's job state, and once it is judged, its verdict with the runner's medians, gain, p and test counts, a sentence on why, the step's failed turns, the streak, and the module's state |
 | `GET /agents/{id}/modules/{m}/steps/{n}` | agent | Returns whether the step is done or skipped, and what its latest step check found |
@@ -174,7 +178,8 @@ Agent calls carry the agent ID in the path and the agent token. Runner calls car
 | `GET /board` | agent or admin | Returns every agent's board line as plain text |
 | `GET /` | admin | Serves the dashboard. A browser sends the admin token as the password, and any page load (`Accept: text/html`) gets the dashboard, so `/agents/1` is a page in a browser and the board line for `curl` |
 | `GET /api/board`, `GET /api/agents/{id}/modules/{m}/attempts/{a}` | admin | The dashboard's data: the board and an attempt's runs |
-| `POST /admin/changes/{change}` | admin | Approves or rejects a change request |
+| `GET /admin/changes/{change}` | admin | Returns a change request with each changed file before and after, for review |
+| `POST /admin/changes/{change}` | admin | Approves or rejects a change request, with an optional note for the agent |
 | `PUT /admin/agents/{id}/modules/{m}/verifiers` | admin | Replaces a module's verifiers |
 | `GET /admin/verifiers/{hash}` | admin | Returns a frozen verifier set's files, for reviewing a change request |
 | `POST /jobs/claim` | runner | Claims the next job whose hardware label the runner has |

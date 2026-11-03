@@ -9,7 +9,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { extname, join, resolve, sep } from 'node:path'
 import type { AgentId, AttemptId, ModuleId } from '../shared/api.ts'
 import * as cmd from './domain/commands.ts'
-import { locate, verifiersOf } from './domain/queries.ts'
+import { baselineJob, locate, verifiersOf } from './domain/queries.ts'
 import type { JobResults, ModuleSpec, ProjectSpec, VerifierSpec } from './domain/records.ts'
 import type { Result } from './domain/result.ts'
 import { verifierProblem } from './domain/rules.ts'
@@ -158,19 +158,37 @@ function stored<T>(s: Service, r: Result<T>, hash: string, files: Files): Result
   return r
 }
 
-/** A change request's edits applied to the module's current verifiers, when they changed after it was filed. */
-function rebasedChange(s: Service, change: string): { spec: VerifierSpec; files: Files } | null {
+const filesOf = (s: Service, hash: string) => {
+  const files = s.files(hash)
+  if (!files) throw new Error(`The files of verifier set ${hash} are missing from the store`)
+  return files
+}
+
+/**
+ * What approving a change request writes: its edits applied to the module's
+ * current verifiers when they changed after it was filed, and to each module
+ * of the project that hasn't started and still has the files the change was
+ * written against.
+ */
+function approval(s: Service, change: string): { rebased: { spec: VerifierSpec; files: Files } | null; others: { module: string; spec: VerifierSpec; files: Files }[] } {
   const found = s.read((w) => cmd.changeRecord(w, change))
   const current = found && verifiersOf(found.m)
-  if (!found || !current || found.c.state !== 'open' || found.c.base === current.hash) return null
+  if (!found || !current || found.c.state !== 'open') return { rebased: null, others: [] }
   const base = found.m.verifiers.find((v) => v.hash === found.c.base)!
-  const filesOf = (hash: string) => {
-    const files = s.files(hash)
-    if (!files) throw new Error(`The files of verifier set ${hash} are missing from the store`)
-    return files
+  const baseUpload = { ...base, files: filesOf(s, base.hash) }
+  const proposed = { ...found.c.proposed, files: filesOf(s, found.c.proposed.hash) }
+  const next = found.c.base === current.hash ? null : rebase(baseUpload, { ...current, files: filesOf(s, current.hash) }, proposed)
+  const others = []
+  for (const m of found.p.modules) {
+    const v = verifiersOf(m)
+    if (m === found.m || m.state !== 'pending' || !v || baselineJob(m)) continue
+    const files = filesOf(s, v.hash)
+    // Only where the changed files are still what the change was written against
+    if (!found.c.changed.every((path) => files[path] === baseUpload.files[path])) continue
+    const upload = rebase(baseUpload, { ...v, files }, proposed)
+    others.push({ module: m.id, spec: specOf(upload), files: upload.files })
   }
-  const next = rebase({ ...base, files: filesOf(base.hash) }, { ...current, files: filesOf(current.hash) }, { ...found.c.proposed, files: filesOf(found.c.proposed.hash) })
-  return { spec: specOf(next), files: next.files }
+  return { rebased: next && { spec: specOf(next), files: next.files }, others }
 }
 
 const ROUTES: Route[] = [
@@ -290,6 +308,24 @@ const ROUTES: Route[] = [
   ],
   [
     'GET',
+    P('/agents/:id/modules/:m'),
+    ['agent'],
+    (s, { params: [agent, module] }) => {
+      const m = s.read((w, now) => view.agentModuleOf(w, agent!, module!, now))
+      return m ? json(m) : missing(`module ${module} for agent ${agent}`)
+    },
+  ],
+  [
+    'GET',
+    P('/agents/:id/modules/:m/verifiers/changes'),
+    ['agent'],
+    (s, { params: [agent, module] }) => {
+      const m = s.read((w, now) => view.agentModuleOf(w, agent!, module!, now))
+      return m ? json(m.changes) : missing(`module ${module} for agent ${agent}`)
+    },
+  ],
+  [
+    'GET',
     P('/agents/:id/modules/:m/steps/:n'),
     ['agent'],
     (s, { params: [agent, module, n] }) => {
@@ -339,13 +375,21 @@ const ROUTES: Route[] = [
     ['admin'],
     async (s, { params: [change], body }) => {
       const b = object(await body())
-      if (typeof b.approve !== 'boolean') throw new HttpError(400, 'badSpec', 'Send {"approve": true} or {"approve": false}.')
-      const rebased = b.approve ? rebasedChange(s, change!) : null
-      const args = { change: change!, approve: b.approve, ...(rebased ? { rebased: rebased.spec } : {}) }
+      if (typeof b.approve !== 'boolean') throw new HttpError(400, 'badSpec', 'Send {"approve": true} or {"approve": false}, and an optional "note" for the agent.')
+      if (b.note !== undefined && typeof b.note !== 'string') throw new HttpError(400, 'badSpec', 'note must be text.')
+      const { rebased, others } = b.approve ? approval(s, change!) : { rebased: null, others: [] }
+      const args = {
+        change: change!,
+        approve: b.approve,
+        ...(rebased ? { rebased: rebased.spec } : {}),
+        ...(b.note ? { note: b.note as string } : {}),
+        others: others.map((o) => ({ module: o.module, verifiers: o.spec })),
+      }
       return reply(
-        s.write('decideChange', { change, approve: b.approve, rebased: rebased?.spec.hash ?? null }, (w, at, config) => {
+        s.write('decideChange', { change, approve: b.approve, note: b.note ?? null, rebased: rebased?.spec.hash ?? null, others: others.map((o) => o.module) }, (w, at, config) => {
           const r = cmd.decideChange(w, at, args, config)
-          return rebased ? stored(s, r, rebased.spec.hash, rebased.files) : r
+          if (r.ok) for (const set of [...(rebased ? [rebased] : []), ...others]) s.putFiles(set.spec.hash, set.files)
+          return r
         }),
       )
     },
@@ -364,6 +408,29 @@ const ROUTES: Route[] = [
       )
     },
     UPLOAD_LIMIT,
+  ],
+  [
+    'GET',
+    P('/admin/changes/:change'),
+    ['admin'],
+    (s, { params: [change] }) => {
+      const found = s.read((w) => cmd.changeRecord(w, change!))
+      if (!found) return missing(`change request ${change}`)
+      const { a, m, c } = found
+      const before = filesOf(s, c.base)
+      const after = filesOf(s, c.proposed.hash)
+      const base = m.verifiers.find((v) => v.hash === c.base)!
+      const settings = (['image', 'hardware', 'timeLimitMinutes', 'commands'] as const).filter((k) => JSON.stringify(base[k]) !== JSON.stringify(c.proposed[k])).map((k) => ({ setting: k, before: base[k], after: c.proposed[k] }))
+      return json({
+        ...s.read((w) => view.changeOf(w, a.id, m.id, c.id)),
+        agent: a.id,
+        author: c.author,
+        moduleTitle: m.title,
+        stale: verifiersOf(m)?.hash !== c.base,
+        files: c.changed.map((path) => ({ path, before: before[path] ?? null, after: after[path] ?? null })),
+        settings,
+      })
+    },
   ],
   [
     'GET',

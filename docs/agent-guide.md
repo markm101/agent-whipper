@@ -75,7 +75,15 @@ Poll for the verdict. The answer gives the runner's numbers: `median`, `bestMedi
 curl -sS "$W/agents/$ID/modules/m1/attempts/a7" -H "$AUTH"
 ```
 
-Only one job runs per module at a time, so wait for a verdict before posting the next attempt. Reposting a commit returns its stored result; it won't be measured again.
+Only one job runs per module at a time, so wait for a verdict before posting the next attempt. Reposting a commit returns its stored result; it won't be measured again. An `attemptId` is unique within its module. The answer's `lastModule` is true when the project ends with this module, so add any module you still plan before its last win.
+
+The test count grows as you go: an attempt runs the regression tests plus the tests of every step that's done, so finishing a step adds that step's tests to later attempts.
+
+To see a module whole, with its steps, attempts, clock, change requests, and its verifiers' commands and files, read it:
+
+```sh
+curl -sS "$W/agents/$ID/modules/m1" -H "$AUTH"
+```
 
 While a job is measuring, don't run heavy work, such as a test suite or your own benchmark, on the machine the runner shares with you. It skews the runs and can turn a real gain into a flat.
 
@@ -93,7 +101,7 @@ The answer says `"done": false` while the check runs. Read the step to see what 
 curl -sS "$W/agents/$ID/modules/m1/steps/1" -H "$AUTH"
 ```
 
-A module that passes before its last step skips the rest, and the step shows `"skipped": true`.
+A module that passes before its last step skips the rest, and the step shows `"skipped": true`. A step whose check finds the same head commit as the step before it, or the start commit, is done but earns no extension: only new work buys time.
 
 ## When a module ends or gets stuck
 
@@ -140,3 +148,5 @@ curl -sS -X POST "$W/agents/$ID/modules/m1/verifiers" -H "$AUTH" -H 'content-typ
 curl -sS -X POST "$W/agents/$ID/modules/m1/verifiers/changes" -H "$AUTH" -H 'content-type: application/json' \
   -d '{ "reason": "The benchmark reads a cold cache on its first run.", "author": "verifier", "files": { "bench/latency.mjs": "…" } }'
 ```
+
+The reason is one line of at most 300 characters. Read the request's state, and the admin's note once it's decided, with `GET $W/agents/$ID/modules/m1/verifiers/changes/<change>`, or list them all at `…/verifiers/changes`. An approval also reaches the project's modules that haven't started, when their copies of the changed files match. A module already running measures its baseline again on the new verifiers, so its target moves to the new scale, and its next attempt waits until that's done.

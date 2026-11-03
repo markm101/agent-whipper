@@ -617,3 +617,50 @@ test('a step’s answer shows what its check found, and steps a module passed wi
   rejects(w, at(6), (x) => stepDone(x, at(6), { agent: 'a', module: 'm1', step: 1 }), 'wrongState')
   assert.equal(stepStatusOf(w, 'a', 'm1', 9), null)
 })
+
+test('a verifier change on a started module measures the baseline again, so its target stays on the new scale', () => {
+  const w = started([mod('cache', ['one', 'two', 'three'])])
+  attempt(w, at(5), 'a1', 96)
+  // An attempt in flight keeps its verifiers, and the new baseline waits for it
+  must(postAttempt(w, at(6), { agent: 'a', module: 'm1', attempt: 'a2', commit: commit('a2'), note: 'Try.' }))
+  must(replaceVerifiers(w, at(7), { agent: 'a', module: 'm1', verifiers: verifiers(3, 'h2') }))
+  assert.equal(moduleOf(w, 'm1').jobs.filter((j) => j.kind === 'baseline').length, 1)
+  const a2 = run(w, at(8), 95)
+  assert.equal(a2.verifierHash, 'h1')
+  // Now the baseline job runs on the new verifiers, on the start commit and the best commit
+  const again = must(claimJob(w, at(9), { runner: 'r1', labels: ['cpu'] }))!
+  assert.deepEqual([again.kind, again.verifierHash, again.commits], ['baseline', 'h2', [commit('a1'), START]])
+  rejects(w, at(9), (x) => postAttempt(x, at(9), { agent: 'a', module: 'm1', attempt: 'a3', commit: commit('a3'), note: 'Too soon.' }), 'jobInFlight')
+  // The new benchmark reads about half the old one
+  const runs = around(commit('a1'), 48).flatMap((x, i) => [x, around(START, 50)[i]!])
+  must(sendResults(w, at(10), { job: again.job, runner: 'r1', results: { outcome: 'done', tests: { passed: 10, total: 10 }, runs, touched: [] } }))
+  const m = viewOf(w, 'm1', at(10))
+  assert.deepEqual([m.goal.baseline, m.goal.target, m.best, m.status.state], [50, 45, 48, 'active'])
+  assert.equal(m.clock.kind === 'running' && m.clock.startedAt, new Date(at(1)).toISOString(), 'the clock still runs from the first baseline')
+})
+
+test('a finished step earns an extension only if its check measured new work', () => {
+  const w = started([mod('cache', ['one', 'two', 'three'])])
+  // Nothing has changed since the start, so this check held the metric but earns nothing
+  step(w, at(2), 1, 100)
+  const f = () => factsOf(locate(w, 'a', 'm1')!.p, moduleOf(w, 'm1'), at(20))
+  assert.deepEqual(f().extensions, [])
+  assert.match(stepStatusOf(w, 'a', 'm1', 1)!.check!.why, /hadn't changed since the last step check/)
+  attempt(w, at(5), 'a1', 99)
+  step(w, at(8), 2, 99)
+  assert.deepEqual(
+    f().extensions.map((e) => [e.minutes, e.cause]),
+    [[45, 'step']],
+  )
+})
+
+test('a decision carries a note, and an approval can also reach modules that haven’t started', () => {
+  const w = started([mod('cache', ['one']), mod('index', ['one', 'two'])])
+  must(freezeVerifiers(w, at(2), { agent: 'a', module: 'm2', author: 'verifier', verifiers: verifiers(2, 'h2') }))
+  const { change } = must(fileChange(w, at(3), { agent: 'a', module: 'm1', reason: 'The benchmark is too short.', proposed: verifiers(1, 'h1b') }))
+  rejects(w, at(4), (x) => decideChange(x, at(4), { change, approve: true, others: [{ module: 'm1', verifiers: verifiers(1, 'h9') }] }), 'badSpec')
+  const r = must(decideChange(w, at(4), { change, approve: true, note: 'Good catch.', others: [{ module: 'm2', verifiers: verifiers(2, 'h2b') }] }))
+  assert.deepEqual(r, { state: 'approved', appliedTo: ['m2'] })
+  assert.deepEqual([moduleOf(w, 'm2').verifiers.at(-1)!.hash, moduleOf(w, 'm2').verifiers.at(-1)!.author], ['h2b', 'verifier'])
+  assert.deepEqual(changeOf(w, 'a', 'm1', change)!.note, 'Good catch.')
+})

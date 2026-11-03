@@ -100,6 +100,8 @@ export interface StepRec {
   doneAt: Ms | null
   /** Whether the step check showed the metric held. Null until the step is done. */
   held: boolean | null
+  /** The head commit the passing check measured. A step that changed nothing earns no extension. */
+  commit?: Commit | null
 }
 
 export interface VerifierSet extends VerifierSpec {
@@ -120,6 +122,10 @@ export interface ChangeRec {
   state: 'open' | 'approved' | 'rejected'
   filedAt: Ms
   decidedAt: Ms | null
+  /** The admin's note on the decision, for the agent to read. */
+  note?: string | null
+  /** Modules that hadn't started, which an approval also gave the change. */
+  appliedTo?: ModuleId[]
 }
 
 export interface Claim {

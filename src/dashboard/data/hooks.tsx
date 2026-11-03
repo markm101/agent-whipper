@@ -29,6 +29,12 @@ export function useDecide() {
   return source.decide ? source.decide.bind(source) : null
 }
 
+/** The source's change-request diff, or null when it has none. */
+export function useReview() {
+  const source = useSource()
+  return source.review ? source.review.bind(source) : null
+}
+
 export function useAttemptDetail(agent: AgentId, module: ModuleId, attempt: AttemptId) {
   const source = useSource()
   return useSyncExternalStore(useSubscribe(source), () => source.attempt(agent, module, attempt))

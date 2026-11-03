@@ -92,6 +92,11 @@ export function rebase(base: VerifierUpload, current: VerifierUpload, proposed: 
     if (content === undefined) delete files[path]
     else files[path] = content
   }
-  const pick = <K extends Exclude<keyof VerifierUpload, 'files'>>(key: K): VerifierUpload[K] => (JSON.stringify(proposed[key]) !== JSON.stringify(base[key]) ? proposed[key] : current[key])
-  return { files, image: pick('image'), commands: pick('commands'), hardware: pick('hardware'), timeLimitMinutes: pick('timeLimitMinutes') }
+  const changed = <T>(from: T, to: T) => JSON.stringify(from) !== JSON.stringify(to)
+  const pick = <K extends 'image' | 'hardware' | 'timeLimitMinutes'>(key: K): VerifierUpload[K] => (changed(base[key], proposed[key]) ? proposed[key] : current[key])
+  // Commands merge one by one; step commands only when both sets have as many steps, since modules differ in steps
+  const [b, c, n] = [base.commands, current.commands, proposed.commands]
+  const command = (key: 'regression' | 'benchmark') => (b[key] !== n[key] ? n[key] : c[key])
+  const steps = changed(b.steps, n.steps) && n.steps.length === c.steps.length ? n.steps : c.steps
+  return { files, image: pick('image'), commands: { regression: command('regression'), steps, benchmark: command('benchmark') }, hardware: pick('hardware'), timeLimitMinutes: pick('timeLimitMinutes') }
 }

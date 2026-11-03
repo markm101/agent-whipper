@@ -1,7 +1,8 @@
 import type { Agent, Module, Project } from './api.ts'
 import { minutesLeft } from './clock.ts'
 
-const round = (n: number) => Math.round(n).toLocaleString('en-US')
+/** Whole numbers from 100 up, three significant figures below, so small values still show progress. */
+const round = (n: number) => (Math.abs(n) >= 100 ? Math.round(n).toLocaleString('en-US') : String(Number(n.toPrecision(3))))
 
 function goal(m: Module) {
   const g = m.goal
@@ -31,10 +32,13 @@ function summary(agentId: string, p: Project): string {
   const passed = p.modules.filter((m) => m.status.state === 'passed').length
   const abandoned = p.modules.length - passed
   const counts = [passed && `${passed} passed`, abandoned && `${abandoned} abandoned`].filter(Boolean).join(', ')
-  const started = p.modules.filter((m) => m.goal.baseline !== null)
-  const [first, end] = [started[0], started.at(-1)]
-  const sameMetric = first && end && started.every((m) => m.goal.metric === first.goal.metric && m.goal.unit === first.goal.unit)
-  const overall = sameMetric && end.best !== null ? ` ${first.goal.metric} ${round(first.goal.baseline!)} -> ${round(end.best)} ${first.goal.unit}.` : ''
+  // Each module's change on its own benchmark, chained, so a benchmark changed mid-project can't skew it
+  const started = p.modules.filter((m) => m.goal.baseline !== null && m.best !== null)
+  const first = started[0]
+  const comparable = first && started.every((m) => m.goal.metric === first.goal.metric && m.goal.direction === first.goal.direction)
+  const ratio = started.reduce((r, m) => r * (m.best! / m.goal.baseline!), 1)
+  const change = first && (first.goal.direction === 'lower' ? (1 - ratio) * 100 : (ratio - 1) * 100)
+  const overall = comparable && change !== undefined && Math.abs(change) >= 0.05 ? ` ${first.goal.metric} ${Number(Math.abs(change).toPrecision(2))}% ${change >= 0 ? first.goal.direction : first.goal.direction === 'lower' ? 'higher' : 'lower'} overall.` : ''
   const lastModule = p.modules.at(-1)
   const commit = lastModule && (lastModule.status.state === 'passed' ? lastModule.headCommit : lastModule.bestCommit)
   const next = commit ? ` To keep climbing, create a new project from ${commit.slice(0, 7)}.` : ''

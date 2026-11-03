@@ -66,7 +66,9 @@ Agent calls take the agent token, runner calls the runner token, and dashboard a
 | `POST /agents/{id}/modules` | agent | Adds a module right after the current one |
 | `POST /agents/{id}/modules/{m}/verifiers` | agent | Submits and freezes a module's verifiers |
 | `POST /agents/{id}/modules/{m}/verifiers/changes` | agent | Files a change request |
-| `GET /agents/{id}/modules/{m}/verifiers/changes/{change}` | agent | Reads a change request |
+| `GET /agents/{id}/modules/{m}` | agent | Reads a module whole, with its verifiers' commands and files |
+| `GET /agents/{id}/modules/{m}/verifiers/changes` | agent | Lists the module's change requests |
+| `GET /agents/{id}/modules/{m}/verifiers/changes/{change}` | agent | Reads a change request and the admin's note |
 | `POST /agents/{id}/modules/{m}/attempts` | agent | Queues an attempt |
 | `GET /agents/{id}/modules/{m}/attempts/{attemptId}` | agent | Reads an attempt's job, verdict with its numbers and why, failed turns, streak, and module state |
 | `POST /agents/{id}/modules/{m}/steps/{n}/done` | agent | Queues a step check |
@@ -75,7 +77,8 @@ Agent calls take the agent token, runner calls the runner token, and dashboard a
 | `GET /agents/{id}` | agent | The agent's board line, as plain text |
 | `GET /board` | agent or admin | Every board line |
 | `GET /api/board`, `GET /api/agents/{id}/modules/{m}/attempts/{a}` | admin | The dashboard's data |
-| `POST /admin/changes/{change}` | admin | Approves or rejects a change request: `{"approve": true}` |
+| `GET /admin/changes/{change}` | admin | A change request with each changed file before and after |
+| `POST /admin/changes/{change}` | admin | Approves or rejects a change request: `{"approve": true, "note": "…"}` |
 | `PUT /admin/agents/{id}/modules/{m}/verifiers` | admin | Replaces a module's verifiers |
 | `GET /admin/verifiers/{hash}` | admin | A frozen verifier set's files |
 | `POST /jobs/claim`, `POST /jobs/{job}/lease`, `POST /jobs/{job}/results` | runner | Claim a job, renew its lease, send its results |

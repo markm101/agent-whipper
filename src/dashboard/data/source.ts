@@ -1,4 +1,4 @@
-import type { AgentId, AttemptDetail, AttemptId, Board, ChangeId, ModuleId } from '../../shared/api.ts'
+import type { AgentId, AttemptDetail, AttemptId, Board, ChangeId, ChangeReview, ModuleId } from '../../shared/api.ts'
 
 /**
  * Where the dashboard's data comes from: whip-server over HTTP, or the mock.
@@ -11,6 +11,8 @@ export interface BoardSource {
   subscribe(listener: () => void): () => void
   /** Null when there is no such attempt, or while it loads. */
   attempt(agent: AgentId, module: ModuleId, attempt: AttemptId): AttemptDetail | null
-  /** Approves or rejects a verifier change request. Resolves to the reason it failed, or null. */
-  decide?(change: ChangeId, approve: boolean): Promise<string | null>
+  /** Approves or rejects a verifier change request, with an optional note for the agent. Resolves to the reason it failed, or null. */
+  decide?(change: ChangeId, approve: boolean, note?: string): Promise<string | null>
+  /** A change request's diff, for review. */
+  review?(change: ChangeId): Promise<ChangeReview | null>
 }

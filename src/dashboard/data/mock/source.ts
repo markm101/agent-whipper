@@ -1,6 +1,6 @@
 import type { AttemptDetail, Board } from '../../../shared/api.ts'
 import type { BoardSource } from '../source.ts'
-import { decideChange, settle } from '../../../server/domain/commands.ts'
+import { changeRecord, decideChange, settle } from '../../../server/domain/commands.ts'
 import type { World } from '../../../server/domain/records.ts'
 import { attemptDetailOf, boardOf } from '../../../server/domain/view.ts'
 import { initialWorld } from './fixtures.ts'
@@ -56,10 +56,17 @@ export function createMockSource({ every = 3500, now = Date.now }: MockOptions =
       if (!details.has(key)) details.set(key, attemptDetailOf(world, agent, module, attempt))
       return details.get(key) ?? null
     },
-    async decide(change, approve) {
+    async review(change) {
+      const found = changeRecord(world, change)
+      if (!found) return null
+      const { a, m, c } = found
+      // The mock keeps no verifier files, only their paths
+      return { change: c.id, agent: a.id, module: m.id, moduleTitle: m.title, author: c.author, reason: c.reason, state: c.state, note: c.note ?? null, stale: false, files: c.changed.map((path) => ({ path, before: null, after: null })), settings: [] }
+    },
+    async decide(change, approve, note) {
       const at = now()
       world = structuredClone(world)
-      const r = decideChange(world, at, { change, approve }, MOCK_CONFIG)
+      const r = decideChange(world, at, { change, approve, ...(note ? { note } : {}) }, MOCK_CONFIG)
       if (!r.ok) return r.rejection.message
       publish(at)
       return null

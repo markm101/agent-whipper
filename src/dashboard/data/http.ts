@@ -2,7 +2,7 @@
 // attempt's detail when a page asks for it, and reloads that detail when the
 // board shows the attempt has moved on. The browser sends the admin token it
 // was asked for when the page loaded.
-import type { AgentId, AttemptDetail, AttemptId, Board, ChangeId, ModuleId } from '../../shared/api.ts'
+import type { AgentId, AttemptDetail, AttemptId, Board, ChangeId, ChangeReview, ModuleId } from '../../shared/api.ts'
 import type { BoardSource } from './source.ts'
 
 export interface HttpOptions {
@@ -75,8 +75,9 @@ export async function createHttpSource({ every = 3000, base = '' }: HttpOptions 
       if (!details.has(k)) load(agent, module, attempt)
       return details.get(k) ?? null
     },
-    async decide(change: ChangeId, approve: boolean) {
-      const res = await fetch(`${base}/admin/changes/${change}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ approve }) })
+    review: (change: ChangeId) => getJson<ChangeReview>(`${base}/admin/changes/${change}`).catch(() => null),
+    async decide(change: ChangeId, approve: boolean, note?: string) {
+      const res = await fetch(`${base}/admin/changes/${change}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ approve, ...(note ? { note } : {}) }) })
       if (res.ok) {
         await poll()
         return null

@@ -168,7 +168,7 @@ test('change requests merge over the frozen files and wait for the admin', async
   assert.deepEqual(board.agents[0]!.project!.modules[0]!.changes[0]!.files, ['bench/latency.js', 'test/regression.test.js'])
 
   assert.equal((await s.call('POST', `/admin/changes/${change}`, { body: { approve: true } })).status, 403)
-  assert.deepEqual((await s.call('POST', `/admin/changes/${change}`, { token: 'admin', body: { approve: true } })).json, { state: 'approved' })
+  assert.deepEqual((await s.call('POST', `/admin/changes/${change}`, { token: 'admin', body: { approve: true } })).json, { state: 'approved', appliedTo: [] })
   // The baseline queued before the approval keeps the verifiers it was queued with
   const first = (await s.call('POST', '/jobs/claim', { token: 'runner', body: { runner: 'r1', labels: ['cpu'] } })).json
   assert.equal(first.verifierHash, hash)
@@ -179,6 +179,31 @@ test('change requests merge over the frozen files and wait for the admin', async
   assert.deepEqual(claim.files, { 'bench/latency.js': 'warm(); bench()' })
   const files = await s.call('GET', `/admin/verifiers/${hash}`, { token: 'admin' })
   assert.deepEqual(files.json, VERIFIERS.files)
+  await s.stop()
+})
+
+test('the admin reviews a change line by line, and an approval reaches the project’s modules that haven’t started', async () => {
+  const s = await boot(join(dir, 'review.db'))
+  const goal = { metric: 'p95 latency', unit: 'ms', direction: 'lower', targetGain: 10 }
+  await s.call('POST', '/agents/5/projects', { body: { title: 'review', startCommit: START, modules: [{ title: 'first', steps: ['One'], goal }, { title: 'second', steps: ['One', 'Two'], goal }, { title: 'third', steps: ['One'], goal }] } })
+  const steps = (n: number) => ({ ...VERIFIERS.commands, steps: Array.from({ length: n }, () => 'node --test') })
+  await s.call('POST', '/agents/5/modules/m1/verifiers', { body: { ...VERIFIERS, commands: steps(1) } })
+  await s.call('POST', '/agents/5/modules/m2/verifiers', { body: { ...VERIFIERS, commands: steps(2) } })
+  // m3's benchmark already differs, so the change doesn't apply to it
+  await s.call('POST', '/agents/5/modules/m3/verifiers', { body: { ...VERIFIERS, commands: steps(1), files: { ...VERIFIERS.files, 'bench/latency.js': 'other()' } } })
+  const { change } = (await s.call('POST', '/agents/5/modules/m1/verifiers/changes', { body: { reason: 'Run the benchmark longer.', files: { 'bench/latency.js': 'longer()' } } })).json
+  const review = (await s.call('GET', `/admin/changes/${change}`, { token: 'admin' })).json
+  assert.deepEqual(review.files, [{ path: 'bench/latency.js', before: VERIFIERS.files['bench/latency.js'], after: 'longer()' }])
+  assert.deepEqual([review.stale, review.moduleTitle, review.author], [false, 'first', '5'])
+  const r = (await s.call('POST', `/admin/changes/${change}`, { token: 'admin', body: { approve: true, note: 'Thanks.' } })).json
+  assert.deepEqual(r, { state: 'approved', appliedTo: ['m2'] })
+  const m2 = (await s.call('GET', '/agents/5/modules/m2')).json
+  assert.equal(m2.commands.steps.length, 2, 'm2 keeps its own step commands')
+  const files = (await s.call('GET', `/admin/verifiers/${m2.verifiers.hash}`, { token: 'admin' })).json
+  assert.equal(files['bench/latency.js'], 'longer()')
+  const changes = (await s.call('GET', '/agents/5/modules/m1/verifiers/changes')).json
+  assert.deepEqual([changes[0].note, changes[0].appliedTo], ['Thanks.', ['m2']])
+  assert.equal((await s.call('GET', `/agents/5/modules/m1/verifiers/changes/${change}`)).json.note, 'Thanks.')
   await s.stop()
 })
 

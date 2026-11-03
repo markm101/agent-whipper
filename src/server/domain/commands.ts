@@ -6,6 +6,9 @@ import type { AgentId, AttemptId, ChangeId, Commit, FlagKind, Iso, JobId, JobSta
 import { holds, judge, reaches } from './judge.ts'
 import {
   agentOf,
+  baselineJob,
+  inFlight,
+  latestBaseline,
   currentOf,
   factsOf,
   failedTurns,
@@ -178,9 +181,11 @@ function expire(m: ModuleRec, j: JobRec, now: Ms) {
 function advance(w: World, a: AgentRec, at: Ms, config: Config) {
   if (a.project && projectEnded(a.project) && a.queued.length) open(a, a.queued.shift()!, at, config)
   const p = a.project
-  const m = p && firstInLine(p)
+  if (!p) return
+  for (const m of p.modules) remeasure(w, a, p, m, at)
+  const m = firstInLine(p)
   const v = m && verifiersOf(m)
-  if (!p || !m || !v) return
+  if (!m || !v) return
   const start = startCommits(p)[p.modules.indexOf(m)]
   if (!start) return
   // One in flight keeps the verifiers it was queued with, and one that failed waits for new verifiers, which change the key
@@ -188,6 +193,26 @@ function advance(w: World, a: AgentRec, at: Ms, config: Config) {
   if (m.jobs.some((j) => j.kind === 'baseline' && (j.state === 'queued' || j.state === 'running'))) return
   if (m.jobs.some((j) => j.key === key && j.state !== 'cancelled')) return
   queue(w, a, m, 'baseline', { step: null, commit: start, bestCommit: null, stepTests: [] }, at)
+}
+
+/**
+ * A live module whose verifiers changed after its baseline measures the
+ * baseline again on them, together with the best commit, so its target and
+ * best stay on the scale its attempts are now measured on. It waits for any
+ * job in flight, which keeps the verifiers it was queued with.
+ */
+function remeasure(w: World, a: AgentRec, p: ProjectRec, m: ModuleRec, at: Ms) {
+  if (!live(m.state)) return
+  const v = verifiersOf(m)
+  const latest = latestBaseline(m)
+  if (!v || !latest || latest.verifierHash === v.hash || inFlight(m)) return
+  const f = factsOf(p, m, at)
+  if (!f.start) return
+  const best = f.best && f.best !== f.start ? f.best : null
+  const key = jobKey('baseline', a, m, f.start, best, null, v.hash)
+  // One that failed stays failed until the verifiers change again
+  if (m.jobs.some((j) => j.key === key && j.state !== 'cancelled')) return
+  queue(w, a, m, 'baseline', { step: null, commit: f.start, bestCommit: best, stepTests: [] }, at)
 }
 
 /** Applies every transition that has come due by `now`: lapsed leases, then modules out of time. */
@@ -222,7 +247,8 @@ function workFlags(m: ModuleRec, j: JobRec, attempt: AttemptId | null, at: Ms) {
 }
 
 function landBaseline(m: ModuleRec, j: JobRec, at: Ms) {
-  if (measured(j)) return move(m, 'baselineMeasured', at)
+  // A baseline taken again on a live module only moves the numbers, which are derived
+  if (measured(j)) return m.state === 'pending' ? move(m, 'baselineMeasured', at) : undefined
   const r = j.results!
   const why =
     r.outcome === 'killed'
@@ -232,7 +258,8 @@ function landBaseline(m: ModuleRec, j: JobRec, at: Ms) {
         : r.tests && r.tests.passed < r.tests.total
           ? `failed ${r.tests.total - r.tests.passed} tests`
           : 'measured nothing'
-  flag(m, 'baselineFailed', null, `The baseline job ${why}. ${m.id} waits for new verifiers or an abandon.`, at)
+  const next = m.state === 'pending' ? `${m.id} waits for new verifiers or an abandon.` : `${m.id} keeps its old baseline, which its new verifiers may not match.`
+  flag(m, 'baselineFailed', null, `The baseline job ${why}. ${next}`, at)
 }
 
 function judgeAttempt(p: ProjectRec, m: ModuleRec, x: AttemptRec, j: JobRec, at: Ms, fresh: boolean) {
@@ -264,6 +291,7 @@ function checkStep(m: ModuleRec, j: JobRec, at: Ms, fresh: boolean) {
   const step = m.steps[j.step! - 1]!
   const values = (c: Commit | null) => valuesOn(j, c).map((run) => run.value)
   step.doneAt = at
+  step.commit = j.commit
   step.held = j.commit === j.bestCommit || holds(values(j.bestCommit), values(j.commit), m.goal.direction)
   if (fresh) workFlags(m, j, null, at)
   if (m.steps.every((s) => s.doneAt !== null)) move(m, 'lastStepDone', at)
@@ -507,27 +535,48 @@ export function changeRecord(w: World, id: string) {
  * was filed, approval takes `rebased`: the request's edits applied to the
  * current set, so an approval never undoes another one.
  */
-export function decideChange(w: World, at: Ms, args: { change: string; approve: boolean; rebased?: VerifierSpec }, config: Config = DEFAULTS): Result<{ state: 'approved' | 'rejected' }> {
+export function decideChange(
+  w: World,
+  at: Ms,
+  args: { change: string; approve: boolean; rebased?: VerifierSpec; note?: string; others?: { module: string; verifiers: VerifierSpec }[] },
+  config: Config = DEFAULTS,
+): Result<{ state: 'approved' | 'rejected'; appliedTo: ModuleId[] }> {
   settle(w, at, config)
   const found = findChange(w, args.change)
   if (!found) return notFound('noChange', `There is no change request ${args.change}.`)
   const { a, m, c } = found
   const state = args.approve ? 'approved' : 'rejected'
-  if (c.state !== 'open') return c.state === state ? ok({ state }) : conflict('changeDecided', `${c.id} was already ${c.state}.`)
+  if (c.state !== 'open') return c.state === state ? ok({ state, appliedTo: c.appliedTo ?? [] }) : conflict('changeDecided', `${c.id} was already ${c.state}.`)
+  if (args.note !== undefined && args.note !== '' && !isText(args.note, 1000)) return invalid('badSpec', 'A note is one line of at most 1,000 characters.')
   if (args.approve && !takes('verifiers', m.state)) return conflict('wrongState', `${m.id} has ended, so its verifiers can't change. Reject the request instead.`)
   const current = verifiersOf(m)!
   const next = c.base === current.hash ? c.proposed : args.rebased
   if (args.approve && !next) return conflict('changeStale', `${m.id}'s verifiers changed after ${c.id} was filed. Apply its edits to the current set and approve that.`)
+  // The same edits for the project's modules that haven't started, each against its own set
+  const others: { m: ModuleRec; v: VerifierSpec }[] = []
+  for (const o of args.approve ? (args.others ?? []) : []) {
+    const om = found.p.modules.find((x) => x.id === o.module)
+    if (!om || om === m || om.state !== 'pending' || baselineJob(om)) return invalid('badSpec', `${o.module} isn't a module of ${found.p.title} that has yet to start.`)
+    const problem = verifierProblem(o.verifiers, om.steps.length)
+    if (problem) return invalid('badSpec', `${om.id}: ${problem}`)
+    others.push({ m: om, v: o.verifiers })
+  }
   if (args.approve && next) {
     const problem = verifierProblem(next, m.steps.length)
     if (problem) return invalid('badSpec', problem)
     // The reviewed edits join the set its author wrote, so the author stays
     if (next.hash !== current.hash) m.verifiers.push({ ...normalVerifiers(next), author: current.author, frozenAt: at })
+    for (const o of others) {
+      const was = verifiersOf(o.m)
+      if (was?.hash !== o.v.hash) o.m.verifiers.push({ ...normalVerifiers(o.v), author: was?.author ?? current.author, frozenAt: at })
+    }
+    c.appliedTo = others.map((o) => o.m.id)
   }
   c.state = state
   c.decidedAt = at
+  c.note = args.note ? args.note.trim() : null
   advance(w, a, at, config)
-  return ok({ state })
+  return ok({ state, appliedTo: c.appliedTo ?? [] })
 }
 
 export function replaceVerifiers(w: World, at: Ms, args: { agent: string; module: string; verifiers: VerifierSpec }, config: Config = DEFAULTS): Result<{ hash: string }> {

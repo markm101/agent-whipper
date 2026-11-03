@@ -105,6 +105,27 @@ export interface ChangeRequest {
   state: 'open' | 'approved' | 'rejected'
   filedAt: Iso
   decidedAt: Iso | null
+  /** The admin's note on the decision. */
+  note: string | null
+  /** Modules that hadn't started, which the approval also gave the change. */
+  appliedTo: ModuleId[]
+}
+
+/** GET /admin/changes/{id}: a change request with what it changes, for review. */
+export interface ChangeReview {
+  change: ChangeId
+  agent: AgentId
+  module: ModuleId
+  moduleTitle: string
+  author: string
+  reason: string
+  state: ChangeRequest['state']
+  note: string | null
+  /** The module's verifiers changed after the request was filed; approving applies its edits to the current set. */
+  stale: boolean
+  /** Null on one side for a file added or deleted, and on both when the contents aren't available. */
+  files: { path: string; before: string | null; after: string | null }[]
+  settings: { setting: string; before: unknown; after: unknown }[]
 }
 
 export interface Module {
