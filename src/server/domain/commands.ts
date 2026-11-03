@@ -253,7 +253,7 @@ function judgeAttempt(p: ProjectRec, m: ModuleRec, x: AttemptRec, j: JobRec, at:
   const verdict = x.judged.verdict
   if (m.state === 'active') {
     if (verdict === 'win' && f.target !== null && reaches(x.judged.median!, f.target, m.goal.direction))
-      move(m, f.streak >= 2 && x.step < m.steps.length ? 'metTargetOnStreak' : 'metTarget', at)
+      move(m, x.step < m.steps.length ? 'metTargetStepsLeft' : 'metTarget', at)
     else if (verdict === 'fail' && failedTurns(m, x.step) >= FAILED_TURNS) move(m, 'stepFailed', at)
   } else if (m.state === 'pastTarget' && verdict !== 'win') move(m, 'streakEnded', at)
 }

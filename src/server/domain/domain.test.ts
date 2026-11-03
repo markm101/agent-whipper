@@ -94,7 +94,7 @@ const step = (w: World, when: Ms, n: number, value: number) => {
 
 test('the lifecycle table moves only the states DESIGN.md allows', () => {
   assert.equal(nextState('baselineMeasured', 'pending'), 'active')
-  assert.equal(nextState('metTargetOnStreak', 'active'), 'pastTarget')
+  assert.equal(nextState('metTargetStepsLeft', 'active'), 'pastTarget')
   assert.equal(nextState('lastStepDone', 'active'), 'stuck')
   assert.equal(nextState('lastStepDone', 'pastTarget'), 'passed')
   assert.equal(nextState('outOfTime', 'pastTarget'), 'passed')
@@ -165,6 +165,18 @@ test('a module starts once its verifiers freeze and its baseline lands, then pas
   must(freezeVerifiers(w, at(11), { agent: 'a', module: 'm2', author: 'verifier', verifiers: verifiers(1, 'h2') }))
   const next = run(w, at(12), 89)
   assert.deepEqual(next.commits, [commit('a2')], 'the next module starts from the passed module’s head commit')
+})
+
+test('a win that meets the target with steps left goes past target, even as the first win', () => {
+  const w = started([mod('cache', ['one', 'two', 'three'])])
+  attempt(w, at(5), 'a1', 50)
+  const m = viewOf(w, 'm1', at(5))
+  assert.deepEqual([m.status.state, m.streak], ['pastTarget', 1])
+  // It keeps going while it wins, and the first attempt that isn't a win passes it
+  attempt(w, at(10), 'a2', 45)
+  assert.equal(viewOf(w, 'm1', at(10)).status.state, 'pastTarget')
+  attempt(w, at(15), 'a3', 45)
+  assert.equal(viewOf(w, 'm1', at(15)).status.state, 'passed')
 })
 
 test('a target met on a streak with steps left goes past target, and the first non-win passes it', () => {
@@ -597,8 +609,10 @@ test('a step’s answer shows what its check found, and steps a module passed wi
   run(w, at(3), 100, { tests: [9, 10] })
   const failed = stepStatusOf(w, 'a', 'm1', 1)!
   assert.deepEqual([failed.done, failed.check!.tests, failed.check!.why], [false, { passed: 9, total: 10 }, '1 of 10 tests failed, so the step stays open.'])
+  // Past target on the first win, then passed by the next attempt that isn't a win
   attempt(w, at(5), 'a1', 89)
-  assert.equal(viewOf(w, 'm1', at(5)).status.state, 'passed')
+  attempt(w, at(6), 'a2', 89)
+  assert.equal(viewOf(w, 'm1', at(6)).status.state, 'passed')
   assert.deepEqual([stepStatusOf(w, 'a', 'm1', 2)!.skipped, stepStatusOf(w, 'a', 'm1', 2)!.check], [true, null])
   rejects(w, at(6), (x) => stepDone(x, at(6), { agent: 'a', module: 'm1', step: 1 }), 'wrongState')
   assert.equal(stepStatusOf(w, 'a', 'm1', 9), null)

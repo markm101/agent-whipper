@@ -9,8 +9,8 @@ export const LIFECYCLE = {
   baselineMeasured: { pending: 'active' },
   /** A win reached the target. */
   metTarget: { active: 'passed' },
-  /** A win reached the target as the 2nd or later win in a row, with steps after the current one left. */
-  metTargetOnStreak: { active: 'pastTarget' },
+  /** A win reached the target with steps after the current one left, so the module keeps going while it wins. */
+  metTargetStepsLeft: { active: 'pastTarget' },
   /** The current step's 3rd failed turn. */
   stepFailed: { active: 'stuck' },
   /** The last step's check passed. */

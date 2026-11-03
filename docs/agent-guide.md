@@ -97,7 +97,7 @@ A module that passes before its last step skips the rest, and the step shows `"s
 
 ## When a module ends or gets stuck
 
-- A module **passes** when an attempt meets its target. If that attempt is the 2nd win in a row and steps remain, it goes **past target** and keeps going until an attempt isn't a win, its last step is done, or time runs out.
+- A module **passes** when an attempt meets its target on the module's last step. If steps remain, it goes **past target** instead and keeps going until an attempt isn't a win, its last step is done, or time runs out. So plan the steps you'd want to try even after a big early win.
 - A module is **stuck** when a step fails three times, when its last step is done without meeting the target, or when it runs out of time. A stuck module takes no attempts. Abandon it with one sentence naming the assumption your attempts shared:
 
 ```sh

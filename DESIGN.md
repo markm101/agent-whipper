@@ -66,7 +66,7 @@ Calls name a module by its ID, which never changes. The server gives each module
 A module is `pending`, `active`, `pastTarget`, `stuck`, `passed`, or `abandoned`. A module ends when it passes or is abandoned. A stuck module has not ended.
 
 1. A pending module becomes active once it is first in line, its verifiers are frozen, and the runner has measured its baseline. It is first in line when its project has just started, or when the module before it has ended. Its clock starts when it becomes active.
-2. An active module passes when an attempt meets its target. If that attempt is the 2nd or later win in a row and steps after the current step remain, the module becomes past target instead.
+2. An active module passes when an attempt meets its target on its last step. If steps after the current step remain, the module becomes past target instead, and keeps going while it wins.
 3. A past-target module passes at its first attempt that isn't a win, when its last step is done, or when it runs out of time.
 4. An active module becomes stuck when its current step fails (cause `step`), when its last step is done without meeting the target (cause `target`), or when it runs out of time (cause `time`). If one result triggers more than one cause, the server records the first in that order. The server accepts no attempts or step checks on a stuck module.
 5. A stuck module becomes abandoned when the agent records `abandonReason`. The reason is one sentence that names the assumption the attempts shared. The agent can also abandon a pending or active module early. Abandoning cancels any job in flight, and a result that arrives later changes nothing.
@@ -129,7 +129,7 @@ Each module gets `maxMinutes` of wall-clock time from when it becomes active. Th
 Conservative targets are often met while a module is still improving. A streak is a run of consecutive wins in one module, and a flat or failed attempt ends it.
 
 - **Extensions shrink.** The first extension is half the module's `maxMinutes`. It goes to the win that makes the module's first streak of 2, or to the first finished step that holds the metric, whichever comes first. After that, every win and every finished step that holds the metric earns half the previous extension. A finished step that makes the metric worse earns nothing. The series never restarts, and it stops once the next extension would be under 5 minutes.
-- **Past target.** A target met by the 2nd or later win in a row, with steps after the current step left, doesn't end the module. It goes past target, as the lifecycle describes.
+- **Past target.** A target met with steps after the current step left doesn't end the module, even on its first win. It goes past target, as the lifecycle describes.
 - **The blurb shows it.** While a streak lasts, the blurb says so, such as "2 wins in a row".
 
 The server halves each extension exactly and shows it rounded. A 90-minute module earns at most 45, 22.5, 11.25, and 5.625 more minutes, shown as 45, 23, 11, and 6. The total stays under the original limit, so no module runs past twice its `maxMinutes`, not counting runner waits, the grace period, or a last attempt still in flight at the deadline.
