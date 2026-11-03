@@ -9,6 +9,8 @@
 # as PostToolBatch or PostToolUse, and it prints the line as that event's
 # hookSpecificOutput.additionalContext, the JSON those events need.
 event=$1
+# Event names are letters only; anything else gets the plain line rather than broken JSON
+case "$event" in *[!A-Za-z]*) event= ;; esac
 
 say() {
   if [ -z "$event" ]; then
