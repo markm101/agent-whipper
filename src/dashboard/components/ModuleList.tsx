@@ -18,7 +18,7 @@ function Verifiers({ m, agent }: { m: Module; agent: Agent }) {
     <span className="modules__verifiers-text">
       <span className="with-icon">
         <Icon name="lock" className="icon-lock" />
-        {plural(v.tests, 'test')} · benchmark on {v.hardware}
+        {v.tests === null ? 'Benchmark' : `${plural(v.tests, 'test')} · benchmark`} on {v.hardware}
       </span>
       {v.author === agent.id && <span className="modules__warn">Written by agent {agent.id}</span>}
       {v.openChanges > 0 && <span className="modules__warn">{plural(v.openChanges, 'change request')} open</span>}

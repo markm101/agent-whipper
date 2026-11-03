@@ -9,6 +9,8 @@ export type AgentId = Brand<string, 'AgentId'>
 export type ModuleId = Brand<string, 'ModuleId'>
 export type AttemptId = Brand<string, 'AttemptId'>
 export type Commit = Brand<string, 'Commit'>
+export type JobId = Brand<string, 'JobId'>
+export type ChangeId = Brand<string, 'ChangeId'>
 /** An ISO 8601 timestamp from the server's clock. */
 export type Iso = Brand<string, 'Iso'>
 
@@ -36,7 +38,8 @@ export interface Step {
   failedTurns: number
 }
 
-export type JobState = 'queued' | 'running' | 'done' | 'killed' | 'failed'
+/** `killed`: ran past its time limit. `failed`: the runner couldn't run it. `cancelled`: its module was abandoned. */
+export type JobState = 'queued' | 'running' | 'done' | 'killed' | 'failed' | 'cancelled'
 
 export interface Attempt {
   id: AttemptId
@@ -81,7 +84,8 @@ export type ModuleStatus =
 
 export type Verifiers =
   | { kind: 'missing' }
-  | { kind: 'frozen'; hash: string; tests: number; author: AgentId; hardware: string; openChanges: number }
+  /** `tests` is the test count of the module's latest job, null until one has run. */
+  | { kind: 'frozen'; hash: string; tests: number | null; author: string; hardware: string; openChanges: number }
 
 export type FlagKind = 'touchedVerifier' | 'fewerTests' | 'lessWork' | 'verdictWithoutJob' | 'selfAuthoredVerifiers' | 'baselineFailed'
 

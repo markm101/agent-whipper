@@ -3,12 +3,14 @@ import { test } from 'node:test'
 import type { Agent, AttemptId, Board, Module, ModuleId } from '../../../shared/api.ts'
 import { boardLine } from '../../../shared/boardLine.ts'
 import { deadlineMinutes, minutesBetween } from '../../../shared/clock.ts'
-import { attemptDetailOf, boardOf } from './derive.ts'
+import { settle } from '../../../server/domain/commands.ts'
+import { extensionSeries, gainOf, improve, judge, median, rankP, reaches } from '../../../server/domain/judge.ts'
+import type { World } from '../../../server/domain/records.ts'
+import { attemptDetailOf, boardOf } from '../../../server/domain/view.ts'
 import { initialWorld } from './fixtures.ts'
-import { extensionSeries, gainOf, improve, judge, median, rankP, reaches } from './judge.ts'
+import { MOCK_CONFIG } from './runner.ts'
 import { createMockSource } from './source.ts'
 import { TIMELINE } from './timeline.ts'
-import { settle, type World } from './world.ts'
 
 const t0 = Date.parse('2026-11-03T03:00:00Z')
 const close = (a: number, b: number, msg?: string) => assert.ok(Math.abs(a - b) < 1e-6, `${msg ?? ''} ${a} != ${b}`)
@@ -21,7 +23,7 @@ function frames() {
     const at = t0 + (i + 1) * 3500
     w = structuredClone(w)
     e.run(w, at)
-    settle(w, at)
+    settle(w, at, MOCK_CONFIG)
     out.push({ label: e.label, board: boardOf(w, at), world: w })
   })
   return out

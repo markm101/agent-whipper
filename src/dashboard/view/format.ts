@@ -73,6 +73,7 @@ export const JOB: Record<JobState, string> = {
   done: 'Judged',
   killed: 'Killed',
   failed: 'Job failed',
+  cancelled: 'Cancelled',
 }
 
 export const WAITING: Record<Extract<ModuleStatus, { state: 'pending' }>['waitingFor'], string> = {

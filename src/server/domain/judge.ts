@@ -1,6 +1,6 @@
-// The mock stands in for the server, so it judges attempts the way DESIGN.md
-// says the server does. The UI never calls any of this.
-import type { Direction, Verdict } from '../../../shared/api.ts'
+// How the server turns a job's runs into numbers and a verdict, as DESIGN.md
+// sets out. Pure math: nothing here knows about modules or time.
+import type { Direction, Verdict } from '../../shared/api.ts'
 
 export function median(xs: readonly number[]): number {
   const s = [...xs].sort((a, b) => a - b)
@@ -67,19 +67,28 @@ export interface JobResult {
   next: readonly number[]
 }
 
+const betterIn = (direction: Direction) => (x: number, y: number) => (direction === 'lower' ? x < y : x > y)
+
 export function judge(r: JobResult, goal: { direction: Direction; minGain: number }): Judged {
   const none = { median: null, bestMedian: null, gain: null, p: null }
   if (r.killed || !r.tests || r.tests.passed < r.tests.total || r.next.length === 0) return { verdict: 'fail', ...none }
   const bestMedian = median(r.best)
   const next = median(r.next)
   const gain = gainOf(bestMedian, next, goal.direction)
-  const better = (x: number, y: number) => (goal.direction === 'lower' ? x < y : x > y)
+  const better = betterIn(goal.direction)
   if (gain >= 0) {
     const p = rankP(r.next, r.best, better)
     return { verdict: gain >= goal.minGain && p < 0.05 ? 'win' : 'flat', median: next, bestMedian, gain, p }
   }
   const p = rankP(r.next, r.best, (x, y) => better(y, x))
   return { verdict: p < 0.05 ? 'fail' : 'flat', median: next, bestMedian, gain, p }
+}
+
+/** A finished step holds the metric unless the rank test shows the head commit worse than the best at p below 0.05. */
+export function holds(best: readonly number[], head: readonly number[], direction: Direction): boolean {
+  if (best.length === 0 || head.length === 0) return false
+  const better = betterIn(direction)
+  return rankP(head, best, (x, y) => better(y, x)) >= 0.05
 }
 
 /**

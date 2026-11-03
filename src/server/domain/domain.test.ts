@@ -1,0 +1,516 @@
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import type { Commit } from '../../shared/api.ts'
+import {
+  abandon,
+  addModule,
+  claimJob,
+  createProject,
+  decideChange,
+  fileChange,
+  freezeVerifiers,
+  postAttempt,
+  renewLease,
+  replaceVerifiers,
+  sendResults,
+  setBlurb,
+  settle,
+  stepDone,
+  type Ticket,
+} from './commands.ts'
+import { agentOf, currentOf, factsOf, locate } from './queries.ts'
+import { DEFAULTS, MINUTE, emptyWorld, type GoalSpec, type ModuleSpec, type Ms, type VerifierSpec, type World } from './records.ts'
+import type { RejectionCode, Result } from './result.ts'
+import { LIFECYCLE, nextState } from './rules.ts'
+import { attemptDetailOf, attemptStatusOf, boardOf, boardText, changeOf } from './view.ts'
+
+const T0 = Date.parse('2026-11-03T00:00:00Z')
+const at = (min: number): Ms => T0 + min * MINUTE
+const commit = (name: string) => [...name].map((c) => c.charCodeAt(0).toString(16)).join('').padEnd(12, '0').slice(0, 40) as Commit
+const START = commit('start')
+
+const GOAL: GoalSpec = { metric: 'p95 latency', unit: 'ms', direction: 'lower', targetGain: 10 }
+const mod = (title: string, steps = ['first', 'second'], extra: Partial<ModuleSpec> = {}): ModuleSpec => ({ title, steps, goal: GOAL, ...extra })
+const verifiers = (steps: number, hash = 'h1', hardware = 'cpu'): VerifierSpec => ({
+  hash,
+  paths: ['bench/latency.ts', 'test/regression.test.ts'],
+  image: 'node:26-slim',
+  commands: { regression: 'npm test -- regression', steps: Array.from({ length: steps }, (_, i) => `npm test -- step-${i + 1}`), benchmark: 'npm run bench' },
+  hardware,
+  timeLimitMinutes: 20,
+})
+
+function must<T>(r: Result<T>): T {
+  if (!r.ok) assert.fail(`${r.rejection.code}: ${r.rejection.message}`)
+  return r.value
+}
+
+/** Checks the call is rejected with `code` and leaves the world exactly as it was. */
+function rejects(w: World, when: Ms, call: (w: World) => Result<unknown>, code: RejectionCode) {
+  settle(w, when)
+  const before = structuredClone(w)
+  const r = call(w)
+  assert.equal(r.ok, false, `expected ${code}`)
+  if (!r.ok) assert.equal(r.rejection.code, code, r.rejection.message)
+  assert.deepEqual(w, before, `${code} left the world changed`)
+}
+
+const OFFSETS = [0, 1, -1, 2, -2]
+const around = (c: Commit, v: number) => OFFSETS.map((k) => ({ commit: c, value: v + k * 0.2, work: 1000 }))
+
+/** A runner claims the next job and reports its runs: `value` on the commit under test, the best value on the best commit. */
+function run(w: World, when: Ms, value: number, opts: { tests?: [number, number]; runner?: string; labels?: string[]; took?: number } = {}): Ticket {
+  const runner = opts.runner ?? 'r1'
+  const t = must(claimJob(w, when, { runner, labels: opts.labels ?? ['cpu'] }))
+  assert.ok(t, 'a job to claim')
+  const { p, m } = locate(w, t.agent, t.module)!
+  const best = factsOf(p, m, when).bestValue
+  const runs = t.commits.length === 1 ? around(t.commit, t.kind === 'baseline' || best === null ? value : best) : around(t.commits[0]!, best!).flatMap((x, i) => [x, around(t.commit, value)[i]!])
+  const [passed, total] = opts.tests ?? [10, 10]
+  must(sendResults(w, when + (opts.took ?? 0) * MINUTE, { job: t.job, runner, results: { outcome: 'done', tests: { passed, total }, runs, touched: [] } }))
+  return t
+}
+
+/** One agent with one open project, its first module's verifiers frozen and its baseline measured at minute 1. */
+function started(modules: ModuleSpec[] = [mod('cache'), mod('index', ['only'])], baseline = 100) {
+  const w = emptyWorld()
+  must(createProject(w, at(0), { agent: 'a', spec: { title: 'search', startCommit: START, modules } }))
+  must(freezeVerifiers(w, at(0), { agent: 'a', module: 'm1', author: 'verifier', verifiers: verifiers(modules[0]!.steps.length) }))
+  run(w, at(1), baseline)
+  return w
+}
+
+const moduleOf = (w: World, id: string) => locate(w, 'a', id)!.m
+const viewOf = (w: World, id: string, now: Ms) => boardOf(w, now).agents[0]!.project!.modules.find((m) => m.id === id)!
+const attempt = (w: World, when: Ms, id: string, value: number, opts: Parameters<typeof run>[3] = {}) => {
+  must(postAttempt(w, when, { agent: 'a', module: current(w), attempt: id, commit: commit(id), note: `Try ${id}.` }))
+  return run(w, when, value, opts)
+}
+const current = (w: World) => currentOf(agentOf(w, 'a')!.project!)!.id
+const step = (w: World, when: Ms, n: number, value: number) => {
+  must(stepDone(w, when, { agent: 'a', module: current(w), step: n }))
+  return run(w, when, value)
+}
+
+test('the lifecycle table moves only the states DESIGN.md allows', () => {
+  assert.equal(nextState('baselineMeasured', 'pending'), 'active')
+  assert.equal(nextState('metTargetOnStreak', 'active'), 'pastTarget')
+  assert.equal(nextState('lastStepDone', 'active'), 'stuck')
+  assert.equal(nextState('lastStepDone', 'pastTarget'), 'passed')
+  assert.equal(nextState('outOfTime', 'pastTarget'), 'passed')
+  assert.equal(nextState('abandoned', 'pastTarget'), null)
+  assert.equal(nextState('stepFailed', 'pastTarget'), null)
+  // Ended modules never move again, and nothing moves back to pending
+  for (const row of Object.values(LIFECYCLE)) {
+    assert.ok(!('passed' in row) && !('abandoned' in row))
+    assert.ok(!Object.values(row).includes('pending' as never))
+  }
+})
+
+test('goals stay conservative and specs are checked before anything is stored', () => {
+  const w = emptyWorld()
+  const create = (spec: object) => (x: World) => createProject(x, at(0), { agent: 'a', spec: { title: 'p', startCommit: START, modules: [mod('m')], ...spec } as never })
+  rejects(w, at(0), create({ modules: [mod('m', ['s'], { goal: { ...GOAL, targetGain: 25 } })] }), 'badSpec')
+  rejects(w, at(0), create({ modules: [mod('m', ['s'], { goal: { ...GOAL, targetGain: 5, minGain: 6 } })] }), 'badSpec')
+  rejects(w, at(0), create({ maxMinutes: 121 }), 'badSpec')
+  rejects(w, at(0), create({ modules: [] }), 'badSpec')
+  rejects(w, at(0), create({ startCommit: 'main' }), 'badSpec')
+  rejects(w, at(0), create({ modules: [mod('m'), mod('m')] }), 'badSpec')
+  rejects(w, at(0), create({ modules: [mod('m', ['s'], { retryOf: 'm1' })] }), 'badSpec')
+  rejects(w, at(0), (x) => createProject(x, at(0), { agent: 'not an id', spec: { title: 'p', startCommit: START, modules: [mod('m')] } }), 'badSpec')
+  assert.equal(w.agents.length, 0)
+  // An ambitious goal may go past the cap, and minGain defaults to 2
+  must(create({ modules: [mod('m', ['s'], { goal: { ...GOAL, targetGain: 25, ambitious: true } })] })(w))
+  assert.equal(moduleOf(w, 'm1').goal.minGain, 2)
+  assert.equal(moduleOf(w, 'm1').maxMinutes, 90)
+})
+
+test('a module starts once its verifiers freeze and its baseline lands, then passes on its target', () => {
+  const w = emptyWorld()
+  must(createProject(w, at(0), { agent: 'a', spec: { title: 'search', startCommit: START, modules: [mod('cache'), mod('index', ['only'])] } }))
+  assert.deepEqual(viewOf(w, 'm1', at(0)).status, { state: 'pending', waitingFor: 'verifiers' })
+  assert.deepEqual(viewOf(w, 'm2', at(0)).status, { state: 'pending', waitingFor: 'turn' })
+  rejects(w, at(0), (x) => postAttempt(x, at(0), { agent: 'a', module: 'm1', attempt: 'a0', commit: commit('a0'), note: 'Early.' }), 'wrongState')
+
+  must(freezeVerifiers(w, at(0), { agent: 'a', module: 'm1', author: 'verifier', verifiers: verifiers(2) }))
+  assert.deepEqual(viewOf(w, 'm1', at(0)).status, { state: 'pending', waitingFor: 'baseline' })
+  const base = run(w, at(1), 100)
+  assert.equal(base.kind, 'baseline')
+  assert.deepEqual(base.commits, [START])
+  const m1 = viewOf(w, 'm1', at(1))
+  assert.equal(m1.status.state, 'active')
+  assert.equal(m1.goal.baseline, 100)
+  assert.equal(m1.goal.target, 90)
+  assert.equal(m1.clock.kind, 'running')
+
+  const a1 = attempt(w, at(5), 'a1', 95)
+  assert.deepEqual(a1.commits, [START, commit('a1')])
+  assert.deepEqual(a1.tests, ['npm test -- regression'])
+  assert.equal(viewOf(w, 'm1', at(5)).attempts[0]!.verdict, 'win')
+  // The finished step held the metric, so it earns the first extension
+  const check = step(w, at(7), 1, 95)
+  assert.equal(check.kind, 'stepCheck')
+  assert.deepEqual(check.commits, [commit('a1')])
+  assert.deepEqual(check.tests, ['npm test -- regression', 'npm test -- step-1'])
+  assert.deepEqual(
+    factsOf(locate(w, 'a', 'm1')!.p, moduleOf(w, 'm1'), at(7)).extensions.map((e) => [e.minutes, e.cause]),
+    [[45, 'step']],
+  )
+  const a2 = attempt(w, at(10), 'a2', 89)
+  assert.deepEqual(a2.tests, ['npm test -- regression', 'npm test -- step-1'])
+  // The target fell on the last step, so the module passes instead of going past target
+  assert.equal(viewOf(w, 'm1', at(10)).status.state, 'passed')
+  assert.equal(boardOf(w, at(10)).agents[0]!.project!.current, 'm2')
+
+  must(freezeVerifiers(w, at(11), { agent: 'a', module: 'm2', author: 'verifier', verifiers: verifiers(1, 'h2') }))
+  const next = run(w, at(12), 89)
+  assert.deepEqual(next.commits, [commit('a2')], 'the next module starts from the passed module’s head commit')
+})
+
+test('a target met on a streak with steps left goes past target, and the first non-win passes it', () => {
+  const w = started([mod('cache', ['one', 'two', 'three'])])
+  attempt(w, at(5), 'a1', 95)
+  attempt(w, at(10), 'a2', 89)
+  const m = viewOf(w, 'm1', at(10))
+  assert.equal(m.status.state, 'pastTarget')
+  assert.equal(m.streak, 2)
+  assert.deepEqual(
+    m.clock.kind === 'running' && m.clock.extensions.map((e) => [e.minutes, e.cause]),
+    [[45, 'streak']],
+  )
+  attempt(w, at(15), 'a3', 89)
+  assert.equal(viewOf(w, 'm1', at(15)).status.state, 'passed')
+})
+
+test('the third failed turn on a step makes the module stuck, and abandoning it drops its commits', () => {
+  const w = started()
+  for (const [i, id] of ['a1', 'a2', 'a3'].entries()) attempt(w, at(5 + i * 5), id, 100, { tests: [8, 10] })
+  const m = viewOf(w, 'm1', at(20))
+  assert.deepEqual(m.status, { state: 'stuck', cause: 'step' })
+  assert.equal(m.steps[0]!.failedTurns, 3)
+  assert.equal(boardOf(w, at(20)).agents[0]!.line.endsWith('Stuck, waiting for an abandon reason.'), true)
+  rejects(w, at(21), (x) => postAttempt(x, at(21), { agent: 'a', module: 'm1', attempt: 'a4', commit: commit('a4'), note: 'Again.' }), 'wrongState')
+  rejects(w, at(21), (x) => stepDone(x, at(21), { agent: 'a', module: 'm1', step: 1 }), 'wrongState')
+  rejects(w, at(21), (x) => abandon(x, at(21), { agent: 'a', module: 'm1', reason: 'Nothing worked.', followUp: mod('cache retry') }), 'followUpNotAllowed')
+  rejects(w, at(21), (x) => abandon(x, at(21), { agent: 'a', module: 'm1', reason: '' }), 'badSpec')
+
+  must(abandon(w, at(22), { agent: 'a', module: 'm1', reason: 'Every attempt assumed the cache fits in memory.' }))
+  assert.deepEqual(viewOf(w, 'm1', at(22)).status, { state: 'abandoned', reason: 'Every attempt assumed the cache fits in memory.', followUp: null })
+  // Repeating the call changes nothing
+  const before = structuredClone(w)
+  must(abandon(w, at(22), { agent: 'a', module: 'm1', reason: 'Something else.' }))
+  assert.deepEqual(w, before)
+  must(freezeVerifiers(w, at(23), { agent: 'a', module: 'm2', author: 'verifier', verifiers: verifiers(1, 'h2') }))
+  assert.deepEqual(run(w, at(24), 100).commits, [START], 'a module abandoned without a win leaves its start commit')
+})
+
+test('abandoning a module with a win takes a follow-up, and a retry aims lower and happens once', () => {
+  const w = started()
+  attempt(w, at(5), 'a1', 95)
+  const reason = 'Every attempt assumed hot keys repeat.'
+  const abandonWith = (followUp?: ModuleSpec) => (x: World) => abandon(x, at(10), { agent: 'a', module: 'm1', reason, ...(followUp ? { followUp } : {}) })
+  rejects(w, at(10), abandonWith(), 'followUpRequired')
+  rejects(w, at(10), abandonWith(mod('cache retry', ['one'], { retryOf: 'm1' })), 'badSpec')
+  rejects(w, at(10), abandonWith(mod('cache retry', ['one'], { retryOf: 'm2', goal: { ...GOAL, targetGain: 5 } })), 'badSpec')
+  rejects(w, at(10), abandonWith(mod('index', ['one'])), 'titleTaken')
+
+  const r = must(abandonWith(mod('cache retry', ['one', 'two'], { retryOf: 'm1', goal: { ...GOAL, targetGain: 5 } }))(w))
+  assert.equal(r.followUp, 'm3')
+  const p = boardOf(w, at(10)).agents[0]!.project!
+  assert.deepEqual(
+    p.modules.map((m) => [m.id, m.position]),
+    [
+      ['m1', 1],
+      ['m3', 2],
+      ['m2', 3],
+    ],
+  )
+  assert.equal(p.current, 'm3')
+  assert.equal(viewOf(w, 'm3', at(10)).retryOf, 'm1')
+
+  must(freezeVerifiers(w, at(11), { agent: 'a', module: 'm3', author: 'verifier', verifiers: verifiers(2, 'h3') }))
+  assert.deepEqual(run(w, at(12), 95).commits, [commit('a1')], 'the follow-up starts from the best commit')
+  attempt(w, at(15), 'b1', 92)
+  rejects(
+    w,
+    at(20),
+    (x) => abandon(x, at(20), { agent: 'a', module: 'm3', reason, followUp: mod('cache retry 2', ['one'], { retryOf: 'm3', goal: { ...GOAL, targetGain: 2 } }) }),
+    'badSpec',
+  )
+  must(abandon(w, at(20), { agent: 'a', module: 'm3', reason, followUp: mod('cache warmup', ['one']) }))
+})
+
+test('the last step done without the target makes the module stuck, and a step that slips earns nothing', () => {
+  const w = started([mod('cache', ['only'])])
+  attempt(w, at(5), 'a1', 99)
+  assert.equal(viewOf(w, 'm1', at(5)).attempts[0]!.verdict, 'flat')
+  step(w, at(8), 1, 104)
+  const m = viewOf(w, 'm1', at(8))
+  assert.deepEqual(m.status, { state: 'stuck', cause: 'target' })
+  assert.deepEqual(m.clock.kind === 'stopped' && m.clock.extensions, [])
+})
+
+test('a step check that fails its tests leaves the step open, and only the current step can be checked', () => {
+  const w = started()
+  rejects(w, at(2), (x) => stepDone(x, at(2), { agent: 'a', module: 'm1', step: 2 }), 'wrongStep')
+  rejects(w, at(2), (x) => stepDone(x, at(2), { agent: 'a', module: 'm1', step: 3 }), 'badSpec')
+  must(stepDone(w, at(2), { agent: 'a', module: 'm1', step: 1 }))
+  assert.equal(must(stepDone(w, at(2), { agent: 'a', module: 'm1', step: 1 })).done, false, 'a repeat returns the job in flight')
+  rejects(w, at(2), (x) => postAttempt(x, at(2), { agent: 'a', module: 'm1', attempt: 'a1', commit: commit('a1'), note: 'Now.' }), 'jobInFlight')
+  run(w, at(3), 100, { tests: [9, 10] })
+  assert.equal(viewOf(w, 'm1', at(3)).steps[0]!.done, false)
+  // The same check again returns the stored result instead of rerunning
+  const again = must(stepDone(w, at(4), { agent: 'a', module: 'm1', step: 1 }))
+  assert.equal(again.done, false)
+  assert.equal(moduleOf(w, 'm1').jobs.filter((j) => j.kind === 'stepCheck').length, 1)
+})
+
+test('one job in flight at a time, and a repeat post returns the stored attempt', () => {
+  const w = started()
+  const posted = must(postAttempt(w, at(5), { agent: 'a', module: 'm1', attempt: 'a1', commit: commit('a1'), note: 'Try.' }))
+  assert.deepEqual(must(postAttempt(w, at(6), { agent: 'a', module: 'm1', attempt: 'a1', commit: commit('a1'), note: 'Try.' })), posted)
+  rejects(w, at(6), (x) => postAttempt(x, at(6), { agent: 'a', module: 'm1', attempt: 'a1', commit: commit('other'), note: 'Try.' }), 'attemptIdTaken')
+  rejects(w, at(6), (x) => postAttempt(x, at(6), { agent: 'a', module: 'm1', attempt: 'a2', commit: commit('a2'), note: 'Try.' }), 'jobInFlight')
+  rejects(w, at(6), (x) => postAttempt(x, at(6), { agent: 'a', module: 'm1', attempt: 'bad id', commit: commit('a2'), note: 'Try.' }), 'badSpec')
+  rejects(w, at(6), (x) => postAttempt(x, at(6), { agent: 'a', module: 'm9', attempt: 'a2', commit: commit('a2'), note: 'Try.' }), 'noModule')
+  rejects(w, at(6), (x) => postAttempt(x, at(6), { agent: 'b', module: 'm1', attempt: 'a2', commit: commit('a2'), note: 'Try.' }), 'noAgent')
+  run(w, at(7), 99)
+  rejects(w, at(8), (x) => postAttempt(x, at(8), { agent: 'a', module: 'm1', attempt: 'a2', commit: START, note: 'The start.' }), 'alreadyBest')
+})
+
+test('reposting a commit returns its stored result instead of rolling the dice again', () => {
+  const w = started()
+  attempt(w, at(5), 'a1', 99)
+  const jobs = moduleOf(w, 'm1').jobs.length
+  const r = must(postAttempt(w, at(10), { agent: 'a', module: 'm1', attempt: 'a2', commit: commit('a1'), note: 'Same again.' }))
+  const m = moduleOf(w, 'm1')
+  assert.equal(m.jobs.length, jobs)
+  assert.equal(r.job, m.attempts[0]!.job)
+  assert.equal(m.attempts[1]!.judged?.verdict, 'flat')
+  assert.equal(attemptStatusOf(w, 'a', 'm1', 'a2', at(10))?.job, 'done')
+})
+
+test('a runner repeating its results changes nothing, and results for a cancelled job are ignored', () => {
+  const w = started()
+  must(postAttempt(w, at(5), { agent: 'a', module: 'm1', attempt: 'a1', commit: commit('a1'), note: 'Try.' }))
+  const t = must(claimJob(w, at(5), { runner: 'r1', labels: ['cpu'] }))!
+  const results = { outcome: 'done' as const, tests: { passed: 10, total: 10 }, runs: around(START, 100).flatMap((x, i) => [x, around(commit('a1'), 95)[i]!]), touched: [] }
+  rejects(w, at(6), (x) => sendResults(x, at(6), { job: t.job, runner: 'r2', results }), 'notYourJob')
+  rejects(w, at(6), (x) => sendResults(x, at(6), { job: t.job, runner: 'r1', results: { ...results, runs: [{ commit: commit('elsewhere') as Commit, value: 1, work: 1 }] } }), 'badResults')
+  rejects(w, at(6), (x) => sendResults(x, at(6), { job: 'j99', runner: 'r1', results }), 'noJob')
+  must(sendResults(w, at(6), { job: t.job, runner: 'r1', results }))
+  const before = structuredClone(w)
+  assert.deepEqual(must(sendResults(w, at(6), { job: t.job, runner: 'r1', results })), { state: 'done' })
+  assert.deepEqual(w, before)
+
+  must(postAttempt(w, at(8), { agent: 'a', module: 'm1', attempt: 'a2', commit: commit('a2'), note: 'Try.' }))
+  const t2 = must(claimJob(w, at(8), { runner: 'r1', labels: ['cpu'] }))!
+  must(abandon(w, at(9), { agent: 'a', module: 'm1', reason: 'The cache was never the bottleneck.', followUp: mod('cache warmup', ['one']) }))
+  assert.deepEqual(must(renewLease(w, at(9), { job: t2.job, runner: 'r1' })), { state: 'cancelled', leaseUntil: null })
+  assert.deepEqual(must(sendResults(w, at(10), { job: t2.job, runner: 'r1', results })), { state: 'cancelled' })
+  assert.equal(attemptStatusOf(w, 'a', 'm1', 'a2', at(10))?.verdict, null)
+  assert.deepEqual(attemptDetailOf(w, 'a' as never, 'm1' as never, 'a2' as never)?.runs, [])
+})
+
+test('a lapsed lease puts the job back in the queue, and the wait counts against no one', () => {
+  const w = started()
+  must(postAttempt(w, at(5), { agent: 'a', module: 'm1', attempt: 'a1', commit: commit('a1'), note: 'Try.' }))
+  const t = must(claimJob(w, at(5), { runner: 'r1', labels: ['cpu'] }))!
+  assert.equal(must(renewLease(w, at(6), { job: t.job, runner: 'r1' })).leaseUntil, new Date(at(8)).toISOString())
+  // r1 goes quiet; its lease ends at minute 8
+  settle(w, at(10))
+  assert.equal(moduleOf(w, 'm1').jobs.at(-1)!.state, 'queued')
+  rejects(w, at(10), (x) => renewLease(x, at(10), { job: t.job, runner: 'r1' }), 'notYourJob')
+  const again = must(claimJob(w, at(12), { runner: 'r2', labels: ['cpu'] }))!
+  assert.equal(again.job, t.job)
+  const f = factsOf(locate(w, 'a', 'm1')!.p, moduleOf(w, 'm1'), at(12))
+  assert.equal(f.waited, 4, 'from the lapse at 8 to the new claim at 12')
+  assert.equal(f.deadline, at(1 + 90 + 4))
+})
+
+test('waiting for a runner stops the clock, even while the wait goes on', () => {
+  const w = started()
+  must(postAttempt(w, at(5), { agent: 'a', module: 'm1', attempt: 'a1', commit: commit('a1'), note: 'Try.' }))
+  const f = (now: number) => factsOf(locate(w, 'a', 'm1')!.p, moduleOf(w, 'm1'), at(now))
+  assert.equal(f(15).waited, 10)
+  assert.equal(f(15).deadline, at(1 + 90 + 10))
+  run(w, at(20), 99)
+  assert.equal(f(30).waited, 15)
+  assert.deepEqual(viewOf(w, 'm1', at(30)).clock.kind === 'running' && viewOf(w, 'm1', at(30)).clock, {
+    kind: 'running',
+    startedAt: new Date(at(1)).toISOString(),
+    deadline: new Date(at(106)).toISOString(),
+    maxMinutes: 90,
+    extensions: [],
+    waits: [{ at: new Date(at(5)).toISOString(), minutes: 15 }],
+    waitedMinutes: 15,
+  })
+})
+
+test('hardware labels route jobs to runners that have them', () => {
+  const w = emptyWorld()
+  must(createProject(w, at(0), { agent: 'a', spec: { title: 'decode', startCommit: START, modules: [mod('kernels')] } }))
+  must(freezeVerifiers(w, at(0), { agent: 'a', module: 'm1', author: 'verifier', verifiers: verifiers(2, 'h1', 'gpu') }))
+  assert.equal(must(claimJob(w, at(1), { runner: 'cpu-1', labels: ['cpu'] })), null)
+  assert.equal(must(claimJob(w, at(1), { runner: 'gpu-1', labels: ['cpu', 'gpu'] }))?.hardware, 'gpu')
+})
+
+test('the oldest queued job goes first', () => {
+  const w = started()
+  must(createProject(w, at(2), { agent: 'b', spec: { title: 'ingest', startCommit: START, modules: [mod('batches')] } }))
+  must(postAttempt(w, at(3), { agent: 'a', module: 'm1', attempt: 'a1', commit: commit('a1'), note: 'Try.' }))
+  must(freezeVerifiers(w, at(4), { agent: 'b', module: 'm1', author: 'verifier', verifiers: verifiers(2) }))
+  assert.equal(must(claimJob(w, at(5), { runner: 'r1', labels: ['cpu'] }))?.agent, 'a')
+  assert.equal(must(claimJob(w, at(5), { runner: 'r2', labels: ['cpu'] }))?.agent, 'b')
+})
+
+test('past the deadline the module gets one last attempt, in the grace period if none was in flight', () => {
+  const w = started([mod('cache', ['one', 'two'], { maxMinutes: 30 })])
+  // Started at minute 1: the deadline is 31 and grace lasts 3 minutes
+  assert.equal(viewOf(w, 'm1', at(32)).clock.kind, 'grace')
+  assert.match(boardOf(w, at(32)).agents[0]!.line, /Time is up, 1 attempt left\.$/)
+  rejects(w, at(32), (x) => stepDone(x, at(32), { agent: 'a', module: 'm1', step: 1 }), 'timeIsUp')
+  attempt(w, at(32), 'a1', 99, { took: 1 })
+  assert.deepEqual(viewOf(w, 'm1', at(33)).status, { state: 'stuck', cause: 'time' })
+  const stopped = viewOf(w, 'm1', at(33)).clock
+  assert.equal(stopped.kind === 'stopped' && stopped.at, new Date(at(33)).toISOString())
+
+  const idle = started([mod('cache', ['one', 'two'], { maxMinutes: 30 })])
+  settle(idle, at(40))
+  assert.deepEqual(viewOf(idle, 'm1', at(40)).status, { state: 'stuck', cause: 'time' })
+  assert.equal(moduleOf(idle, 'm1').stoppedAt, at(34), 'it ran out when the grace period ended')
+  rejects(idle, at(40), (x) => postAttempt(x, at(40), { agent: 'a', module: 'm1', attempt: 'late', commit: commit('late'), note: 'Late.' }), 'wrongState')
+})
+
+test('an attempt in flight at the deadline is the last one, and a win that extends the deadline carries on', () => {
+  const w = started([mod('cache', ['one', 'two', 'three'], { maxMinutes: 30 })])
+  attempt(w, at(10), 'a1', 95)
+  must(postAttempt(w, at(30), { agent: 'a', module: 'm1', attempt: 'a2', commit: commit('a2'), note: 'Try.' }))
+  assert.equal(viewOf(w, 'm1', at(33)).clock.kind, 'running', 'no grace period opens while the last attempt is in flight')
+  rejects(w, at(33), (x) => postAttempt(x, at(33), { agent: 'a', module: 'm1', attempt: 'a3', commit: commit('a3'), note: 'Try.' }), 'jobInFlight')
+  // The second win in a row earns 15 minutes, which moves the deadline past the present
+  run(w, at(36), 92)
+  const m = viewOf(w, 'm1', at(36))
+  assert.equal(m.status.state, 'active')
+  assert.equal(m.clock.kind === 'running' && m.clock.deadline, new Date(at(1 + 30 + 15 + 6)).toISOString(), 'the job waited 6 minutes for a runner')
+
+  const pastTarget = started([mod('cache', ['one', 'two', 'three'], { maxMinutes: 30 })])
+  attempt(pastTarget, at(5), 'a1', 95)
+  attempt(pastTarget, at(10), 'a2', 89)
+  assert.equal(viewOf(pastTarget, 'm1', at(10)).status.state, 'pastTarget')
+  settle(pastTarget, at(60))
+  assert.equal(viewOf(pastTarget, 'm1', at(60)).status.state, 'passed', 'running out of time passes a module past its target')
+})
+
+test('a failed baseline flags the module, and approved verifiers measure it again', () => {
+  const w = emptyWorld()
+  must(createProject(w, at(0), { agent: 'a', spec: { title: 'search', startCommit: START, modules: [mod('cache')] } }))
+  must(freezeVerifiers(w, at(0), { agent: 'a', module: 'm1', author: 'a', verifiers: verifiers(2) }))
+  run(w, at(1), 100, { tests: [9, 10] })
+  const m = viewOf(w, 'm1', at(1))
+  assert.deepEqual(m.status, { state: 'pending', waitingFor: 'verifiers' })
+  assert.deepEqual(
+    m.flags.map((f) => f.kind),
+    ['selfAuthoredVerifiers', 'baselineFailed'],
+  )
+  assert.equal(must(claimJob(w, at(2), { runner: 'r1', labels: ['cpu'] })), null, 'it waits for new verifiers')
+  rejects(w, at(2), (x) => freezeVerifiers(x, at(2), { agent: 'a', module: 'm1', author: 'verifier', verifiers: verifiers(2, 'h2') }), 'verifiersFrozen')
+  rejects(w, at(2), (x) => fileChange(x, at(2), { agent: 'a', module: 'm1', reason: 'Same files.', proposed: verifiers(2) }), 'badSpec')
+
+  const { change } = must(fileChange(w, at(2), { agent: 'a', module: 'm1', reason: 'A regression test depends on the network.', proposed: verifiers(2, 'h2') }))
+  const frozen = viewOf(w, 'm1', at(2)).verifiers
+  assert.equal(frozen.kind === 'frozen' && frozen.openChanges, 1)
+  assert.equal(changeOf(w, 'a', 'm1', change)?.state, 'open')
+  must(decideChange(w, at(3), { change, approve: true }))
+  rejects(w, at(3), (x) => decideChange(x, at(3), { change, approve: false }), 'changeDecided')
+  assert.equal(changeOf(w, 'a', 'm1', change)?.state, 'approved')
+  const t = run(w, at(4), 100)
+  assert.equal(t.verifierHash, 'h2')
+  assert.equal(viewOf(w, 'm1', at(4)).status.state, 'active')
+
+  must(replaceVerifiers(w, at(5), { agent: 'a', module: 'm1', verifiers: verifiers(2, 'h3') }))
+  const v = viewOf(w, 'm1', at(5)).verifiers
+  assert.deepEqual(v.kind === 'frozen' && [v.hash, v.author, v.tests], ['h3', 'admin', 10])
+})
+
+test('a project sent while one is open waits in the queue and opens when the first ends', () => {
+  const w = started([mod('cache', ['only'])])
+  const next = { title: 'index-size', startCommit: commit('index'), modules: [mod('compression', ['only'])] }
+  assert.deepEqual(must(createProject(w, at(2), { agent: 'a', spec: next })), { state: 'queued', position: 1 })
+  assert.deepEqual(must(createProject(w, at(2), { agent: 'a', spec: next })), { state: 'queued', position: 1 })
+  rejects(w, at(2), (x) => createProject(x, at(2), { agent: 'a', spec: { ...next, startCommit: commit('other') } }), 'titleTaken')
+  assert.deepEqual(boardOf(w, at(2)).agents[0]!.queued, ['index-size'])
+
+  attempt(w, at(5), 'a1', 89)
+  const a = boardOf(w, at(5)).agents[0]!
+  assert.equal(a.project?.title, 'index-size')
+  assert.deepEqual(
+    a.project?.modules.map((m) => m.id),
+    ['m2'],
+  )
+  assert.deepEqual(a.queued, [])
+  rejects(w, at(6), (x) => createProject(x, at(6), { agent: 'a', spec: { title: 'search', startCommit: START, modules: [mod('again')] } }), 'titleTaken')
+})
+
+test('a new module goes right after the current one, and a repeat returns it', () => {
+  const w = started()
+  const extra = mod('early termination', ['only'])
+  assert.deepEqual(must(addModule(w, at(2), { agent: 'a', spec: extra })), { module: 'm3' })
+  assert.deepEqual(must(addModule(w, at(3), { agent: 'a', spec: extra })), { module: 'm3' })
+  rejects(w, at(3), (x) => addModule(x, at(3), { agent: 'a', spec: mod('early termination', ['other']) }), 'titleTaken')
+  rejects(w, at(3), (x) => addModule(x, at(3), { agent: 'a', spec: mod('retry', ['one'], { retryOf: 'm1' }) }), 'badSpec')
+  rejects(w, at(3), (x) => addModule(x, at(3), { agent: 'nobody', spec: extra }), 'noAgent')
+  assert.deepEqual(
+    boardOf(w, at(3)).agents[0]!.project!.modules.map((m) => m.id),
+    ['m1', 'm3', 'm2'],
+  )
+})
+
+test('the dashboard flags a touched verifier, fewer tests, and less work', () => {
+  const w = started()
+  must(postAttempt(w, at(5), { agent: 'a', module: 'm1', attempt: 'a1', commit: commit('a1'), note: 'Try.' }))
+  let t = must(claimJob(w, at(5), { runner: 'r1', labels: ['cpu'] }))!
+  const runs = (work: number) => around(START, 100).flatMap((x, i) => [x, { ...around(commit('a1'), 99)[i]!, work }])
+  must(sendResults(w, at(6), { job: t.job, runner: 'r1', results: { outcome: 'done', tests: { passed: 10, total: 10 }, runs: runs(1000), touched: ['bench/latency.ts'] } }))
+  must(postAttempt(w, at(7), { agent: 'a', module: 'm1', attempt: 'a2', commit: commit('a2'), note: 'Try.' }))
+  t = must(claimJob(w, at(7), { runner: 'r1', labels: ['cpu'] }))!
+  // a1 was flat, so the best commit is still the start commit
+  const fewer = around(START, 100).flatMap((x, i) => [x, { ...around(commit('a2'), 97)[i]!, work: 500 }])
+  must(sendResults(w, at(8), { job: t.job, runner: 'r1', results: { outcome: 'done', tests: { passed: 8, total: 8 }, runs: fewer, touched: [] } }))
+  assert.deepEqual(
+    viewOf(w, 'm1', at(8)).flags.map((f) => [f.kind, f.attempt]),
+    [
+      ['touchedVerifier', 'a1'],
+      ['fewerTests', 'a2'],
+      ['lessWork', 'a2'],
+    ],
+  )
+})
+
+test('a killed job is a failed turn', () => {
+  const w = started()
+  must(postAttempt(w, at(5), { agent: 'a', module: 'm1', attempt: 'a1', commit: commit('a1'), note: 'Try.' }))
+  const t = must(claimJob(w, at(5), { runner: 'r1', labels: ['cpu'] }))!
+  for (let min = 6; min <= 24; min++) must(renewLease(w, at(min), { job: t.job, runner: 'r1' }))
+  must(sendResults(w, at(25), { job: t.job, runner: 'r1', results: { outcome: 'killed', tests: null, runs: [], touched: [] } }))
+  const m = viewOf(w, 'm1', at(25))
+  assert.deepEqual([m.attempts[0]!.job, m.attempts[0]!.verdict, m.steps[0]!.failedTurns], ['killed', 'fail', 1])
+})
+
+test('blurbs are one line, and the plain board lists every agent', () => {
+  const w = started()
+  rejects(w, at(2), (x) => setBlurb(x, at(2), { agent: 'a', blurb: 'two\nlines' }), 'badSpec')
+  must(setBlurb(w, at(2), { agent: 'a', blurb: 'Caching parsed queries.' }))
+  must(setBlurb(w, at(2), { agent: 'b', blurb: 'Starting up.' }))
+  assert.equal(
+    boardText(w, at(2)),
+    [
+      'agent a: Project: search, Module (1 / 2): cache, Progress: 0 / 2, Blurb: Caching parsed queries. Goal: p95 latency 100 -> 90 ms, 10% lower. 89 min left.',
+      'agent b: no open project',
+    ].join('\n'),
+  )
+})
+
+test('defaults match DESIGN.md', () => {
+  assert.deepEqual(DEFAULTS, { defaultMaxMinutes: 90, maxMinutesCeiling: 120, leaseMinutes: 2, runs: 5 })
+})

@@ -1,0 +1,612 @@
+// The calls that change the world, one per API route. Each settles the world
+// at the call's time first, as the server does on every request. Then it
+// either rejects without touching anything, or applies the change and
+// returns what the caller needs. Repeating a call has no further effect.
+import type { AgentId, AttemptId, ChangeId, Commit, FlagKind, Iso, JobId, JobState, ModuleId } from '../../shared/api.ts'
+import { holds, judge, reaches } from './judge.ts'
+import {
+  agentOf,
+  currentOf,
+  factsOf,
+  failedTurns,
+  findJob,
+  firstInLine,
+  lastWin,
+  locate,
+  measured,
+  projectEnded,
+  startCommits,
+  timesOutAt,
+  verifierSet,
+  verifiersOf,
+  type Located,
+} from './queries.ts'
+import {
+  DEFAULTS,
+  MINUTE,
+  iso,
+  type AgentRec,
+  type AttemptRec,
+  type Config,
+  type JobKind,
+  type JobRec,
+  type JobResults,
+  type ModuleRec,
+  type ModuleSpec,
+  type Ms,
+  type ProjectRec,
+  type ProjectSpec,
+  type VerifierSpec,
+  type World,
+} from './records.ts'
+import { conflict, invalid, notFound, ok, type Failure, type Result } from './result.ts'
+import { CAUSE, FAILED_TURNS, goalOf, isAgentId, isCommit, isText, live, moduleProblem, nextState, projectProblem, takes, verifierProblem, type ModuleEvent } from './rules.ts'
+
+// Moving modules and raising flags
+
+function move(m: ModuleRec, event: ModuleEvent, at: Ms) {
+  const next = nextState(event, m.state)
+  if (!next) throw new Error(`${event} can't move ${m.id} from ${m.state}`)
+  m.cause = CAUSE[event] ?? (event === 'abandoned' ? m.cause : null)
+  m.state = next
+  if (next !== 'pending' && !live(next)) m.stoppedAt ??= at
+}
+
+function flag(m: ModuleRec, kind: FlagKind, attempt: AttemptId | null, detail: string, at: Ms) {
+  m.flags.push({ kind, attempt, detail, at })
+}
+
+// Specs
+
+const normalModule = (s: ModuleSpec): ModuleSpec => ({
+  title: s.title.trim(),
+  steps: s.steps.map((x) => x.trim()),
+  goal: goalOf(s.goal),
+  ...(s.maxMinutes === undefined ? {} : { maxMinutes: s.maxMinutes }),
+  ...(s.retryOf === undefined ? {} : { retryOf: s.retryOf }),
+})
+
+const normalProject = (s: ProjectSpec): ProjectSpec => ({
+  title: s.title.trim(),
+  startCommit: s.startCommit.toLowerCase(),
+  ...(s.maxMinutes === undefined ? {} : { maxMinutes: s.maxMinutes }),
+  modules: s.modules.map(normalModule),
+})
+
+const normalVerifiers = (v: VerifierSpec): VerifierSpec => ({
+  hash: v.hash,
+  paths: [...v.paths],
+  image: v.image,
+  commands: { regression: v.commands.regression, steps: [...v.commands.steps], benchmark: v.commands.benchmark },
+  hardware: v.hardware,
+  timeLimitMinutes: v.timeLimitMinutes,
+})
+
+const keyOf = (s: ModuleSpec | ProjectSpec) => JSON.stringify(s)
+
+function moduleFrom(a: AgentRec, spec: ModuleSpec, projectMax: number | null, config: Config): ModuleRec {
+  const s = normalModule(spec)
+  a.modules++
+  return {
+    id: `m${a.modules}` as ModuleId,
+    specKey: keyOf(s),
+    title: s.title,
+    steps: s.steps.map((title) => ({ title, doneAt: null, held: null })),
+    goal: goalOf(s.goal),
+    maxMinutes: s.maxMinutes ?? projectMax ?? config.defaultMaxMinutes,
+    retryOf: (s.retryOf ?? null) as ModuleId | null,
+    verifiers: [],
+    changes: [],
+    state: 'pending',
+    cause: null,
+    reason: null,
+    followUp: null,
+    stoppedAt: null,
+    attempts: [],
+    jobs: [],
+    flags: [],
+  }
+}
+
+function open(a: AgentRec, spec: ProjectSpec, at: Ms, config: Config) {
+  if (a.project) a.past.push(a.project)
+  const maxMinutes = spec.maxMinutes ?? null
+  const p: ProjectRec = { title: spec.title, specKey: keyOf(spec), startCommit: spec.startCommit as Commit, maxMinutes, modules: [], openedAt: at }
+  p.modules = spec.modules.map((s) => moduleFrom(a, s, maxMinutes, config))
+  a.project = p
+}
+
+function ensureAgent(w: World, id: string): AgentRec {
+  const found = agentOf(w, id)
+  if (found) return found
+  const a: AgentRec = { id: id as AgentId, blurb: '', project: null, queued: [], past: [], modules: 0 }
+  w.agents.push(a)
+  return a
+}
+
+const badAgent = (): Failure => invalid('badSpec', 'An agent ID is 1 to 40 letters, digits, dashes, or underscores.')
+
+// Jobs
+
+const jobKey = (kind: JobKind, a: AgentRec, m: ModuleRec, commit: Commit, bestCommit: Commit | null, step: number | null, hash: string) =>
+  [kind, a.id, m.id, commit, bestCommit ?? '-', step ?? '-', hash].join(':')
+
+/** Queues a job, or returns the stored one when the same job has already run. */
+function queue(w: World, a: AgentRec, m: ModuleRec, kind: JobKind, fields: Pick<JobRec, 'step' | 'commit' | 'bestCommit' | 'stepTests'>, at: Ms): JobRec {
+  const hash = verifiersOf(m)!.hash
+  const key = jobKey(kind, a, m, fields.commit, fields.bestCommit, fields.step, hash)
+  const ran = m.jobs.findLast((j) => j.key === key && (j.state === 'done' || j.state === 'killed'))
+  if (ran) return ran
+  w.jobs++
+  const job: JobRec = { id: `j${w.jobs}` as JobId, key, kind, module: m.id, ...fields, verifierHash: hash, state: 'queued', queuedAt: at, claims: [], finishedAt: null, results: null }
+  m.jobs.push(job)
+  return job
+}
+
+function cancel(j: JobRec, at: Ms) {
+  const claim = j.claims.at(-1)
+  if (j.state === 'running' && claim) claim.endedAt = at
+  j.state = 'cancelled'
+  j.finishedAt = at
+}
+
+/** A lapsed lease puts the job back in the queue for any runner. */
+function lapse(j: JobRec, now: Ms) {
+  const claim = j.claims.at(-1)
+  if (j.state !== 'running' || !claim || claim.leaseUntil > now) return
+  claim.lapsed = true
+  claim.endedAt = claim.leaseUntil
+  j.state = 'queued'
+}
+
+/** Opens the next queued project once the open one ends, and queues the baseline of the module whose turn it is. */
+function advance(w: World, a: AgentRec, at: Ms, config: Config) {
+  if (a.project && projectEnded(a.project) && a.queued.length) open(a, a.queued.shift()!, at, config)
+  const p = a.project
+  const m = p && firstInLine(p)
+  const v = m && verifiersOf(m)
+  if (!p || !m || !v) return
+  const start = startCommits(p)[p.modules.indexOf(m)]
+  if (!start) return
+  // A baseline that failed waits for new verifiers, which change the key
+  const key = jobKey('baseline', a, m, start, null, null, v.hash)
+  if (m.jobs.some((j) => j.key === key && j.state !== 'cancelled')) return
+  queue(w, a, m, 'baseline', { step: null, commit: start, bestCommit: null, stepTests: [] }, at)
+}
+
+/** Applies every transition that has come due by `now`: lapsed leases, then modules out of time. */
+export function settle(w: World, now: Ms, config: Config = DEFAULTS) {
+  for (const a of w.agents) {
+    const p = a.project
+    if (!p) continue
+    for (const m of p.modules) {
+      for (const j of m.jobs) lapse(j, now)
+      if (!live(m.state)) continue
+      const f = factsOf(p, m, now)
+      if (f.deadline === null || now < f.deadline) continue
+      const out = timesOutAt(m, f)
+      if (out === null || now < out) continue
+      move(m, 'outOfTime', out)
+      advance(w, a, out, config)
+    }
+    advance(w, a, now, config)
+  }
+}
+
+// Applying a job's results
+
+const valuesOn = (j: JobRec, commit: Commit | null) => j.results!.runs.filter((r) => r.commit === commit)
+
+function workFlags(m: ModuleRec, j: JobRec, attempt: AttemptId | null, at: Ms) {
+  const best = valuesOn(j, j.bestCommit)
+  const next = valuesOn(j, j.commit)
+  if (!best.length || j.commit === j.bestCommit) return
+  const least = Math.min(...best.map((r) => r.work))
+  if (next.some((r) => r.work < least)) flag(m, 'lessWork', attempt, `A run on ${j.commit.slice(0, 7)} did less work than the best commit's runs.`, at)
+}
+
+function landBaseline(m: ModuleRec, j: JobRec, at: Ms) {
+  if (measured(j)) return move(m, 'baselineMeasured', at)
+  const r = j.results!
+  const why = j.state === 'killed' ? 'ran past its time limit' : r.tests && r.tests.passed < r.tests.total ? `failed ${r.tests.total - r.tests.passed} tests` : 'measured nothing'
+  flag(m, 'baselineFailed', null, `The baseline job ${why}. ${m.id} waits for new verifiers or an abandon.`, at)
+}
+
+function judgeAttempt(p: ProjectRec, m: ModuleRec, x: AttemptRec, j: JobRec, at: Ms, fresh: boolean) {
+  const r = j.results!
+  const values = (c: Commit | null) => valuesOn(j, c).map((run) => run.value)
+  x.judged = judge({ tests: r.tests, killed: r.outcome !== 'done', best: values(j.bestCommit), next: values(j.commit) }, m.goal)
+  x.judgedAt = at
+
+  if (fresh) {
+    if (r.touched.length) flag(m, 'touchedVerifier', x.id, `${r.touched.join(', ')} changed. The runner used the frozen copy.`, at)
+    const before = m.attempts.slice(0, m.attempts.indexOf(x)).findLast((y) => m.jobs.find((k) => k.id === y.job)?.results?.tests)
+    const was = before && m.jobs.find((k) => k.id === before.job)!.results!.tests!.total
+    if (r.tests && was && r.tests.total < was) flag(m, 'fewerTests', x.id, `${r.tests.total} tests ran, ${was - r.tests.total} fewer than in ${before.id}.`, at)
+    workFlags(m, j, x.id, at)
+  }
+
+  const f = factsOf(p, m, at)
+  const verdict = x.judged.verdict
+  if (m.state === 'active') {
+    if (verdict === 'win' && f.target !== null && reaches(x.judged.median!, f.target, m.goal.direction))
+      move(m, f.streak >= 2 && x.step < m.steps.length ? 'metTargetOnStreak' : 'metTarget', at)
+    else if (verdict === 'fail' && failedTurns(m, x.step) >= FAILED_TURNS) move(m, 'stepFailed', at)
+  } else if (m.state === 'pastTarget' && verdict !== 'win') move(m, 'streakEnded', at)
+}
+
+function checkStep(m: ModuleRec, j: JobRec, at: Ms, fresh: boolean) {
+  const r = j.results!
+  if (r.outcome !== 'done' || !r.tests || r.tests.passed < r.tests.total) return
+  const step = m.steps[j.step! - 1]!
+  const values = (c: Commit | null) => valuesOn(j, c).map((run) => run.value)
+  step.doneAt = at
+  step.held = j.commit === j.bestCommit || holds(values(j.bestCommit), values(j.commit), m.goal.direction)
+  if (fresh) workFlags(m, j, null, at)
+  if (m.steps.every((s) => s.doneAt !== null)) move(m, 'lastStepDone', at)
+}
+
+function apply(p: ProjectRec, m: ModuleRec, j: JobRec, at: Ms, fresh: boolean) {
+  if (j.kind === 'baseline') return landBaseline(m, j, at)
+  if (j.kind === 'stepCheck') return checkStep(m, j, at, fresh)
+  const x = m.attempts.findLast((y) => y.job === j.id && y.judged === null)
+  if (x) judgeAttempt(p, m, x, j, at, fresh)
+}
+
+// Agent calls
+
+function find(w: World, agent: string, module: string): Result<Located> {
+  const found = locate(w, agent, module)
+  if (found) return ok(found)
+  return agentOf(w, agent) ? notFound('noModule', `Agent ${agent} has no module ${module}.`) : notFound('noAgent', `There is no agent ${agent}.`)
+}
+
+export type Created = { state: 'open'; modules: ModuleId[] } | { state: 'queued'; position: number }
+
+export function createProject(w: World, at: Ms, args: { agent: string; spec: ProjectSpec }, config: Config = DEFAULTS): Result<Created> {
+  settle(w, at, config)
+  if (!isAgentId(args.agent)) return badAgent()
+  const problem = projectProblem(args.spec, config)
+  if (problem) return invalid('badSpec', problem)
+  const spec = normalProject(args.spec)
+  const a = agentOf(w, args.agent)
+  const openOne = a?.project && !projectEnded(a.project) ? a.project : null
+  const queuedAt = a?.queued.findIndex((q) => q.title === spec.title) ?? -1
+
+  if (openOne?.title === spec.title) {
+    if (openOne.specKey !== keyOf(spec)) return conflict('titleTaken', `Project "${spec.title}" is open with a different plan.`)
+    return ok({ state: 'open', modules: openOne.modules.map((m) => m.id) })
+  }
+  if (a && queuedAt !== -1) {
+    if (keyOf(a.queued[queuedAt]!) !== keyOf(spec)) return conflict('titleTaken', `Project "${spec.title}" is queued with a different plan.`)
+    return ok({ state: 'queued', position: queuedAt + 1 })
+  }
+  if (a && [a.project, ...a.past].some((x) => x?.title === spec.title)) return conflict('titleTaken', `Agent ${a.id} already had a project titled "${spec.title}".`)
+
+  const agent = ensureAgent(w, args.agent)
+  if (openOne) {
+    agent.queued.push(spec)
+    return ok({ state: 'queued', position: agent.queued.length })
+  }
+  open(agent, spec, at, config)
+  advance(w, agent, at, config)
+  return ok({ state: 'open', modules: agent.project!.modules.map((m) => m.id) })
+}
+
+export function setBlurb(w: World, at: Ms, args: { agent: string; blurb: string }, config: Config = DEFAULTS): Result<null> {
+  settle(w, at, config)
+  if (!isAgentId(args.agent)) return badAgent()
+  if (typeof args.blurb !== 'string' || args.blurb.length > 280 || /[\r\n]/.test(args.blurb)) return invalid('badSpec', 'A blurb is one line of at most 280 characters.')
+  ensureAgent(w, args.agent).blurb = args.blurb.trim()
+  return ok(null)
+}
+
+export function addModule(w: World, at: Ms, args: { agent: string; spec: ModuleSpec }, config: Config = DEFAULTS): Result<{ module: ModuleId }> {
+  settle(w, at, config)
+  const a = agentOf(w, args.agent)
+  if (!a) return notFound('noAgent', `There is no agent ${args.agent}.`)
+  const p = a.project
+  if (!p || projectEnded(p)) return conflict('noOpenProject', `Agent ${a.id} has no open project. Create a project instead.`)
+  const problem = moduleProblem(args.spec, config)
+  if (problem) return invalid('badSpec', problem)
+  if (args.spec.retryOf !== undefined) return invalid('badSpec', 'Only an abandon follow-up can retry a module.')
+  const spec = normalModule(args.spec)
+  const same = p.modules.find((m) => m.title === spec.title)
+  if (same) return same.specKey === keyOf(spec) ? ok({ module: same.id }) : conflict('titleTaken', `Project "${p.title}" already has a module titled "${spec.title}".`)
+  const m = moduleFrom(a, spec, p.maxMinutes, config)
+  p.modules.splice(p.modules.indexOf(currentOf(p)!) + 1, 0, m)
+  advance(w, a, at, config)
+  return ok({ module: m.id })
+}
+
+export function freezeVerifiers(w: World, at: Ms, args: { agent: string; module: string; author: string; verifiers: VerifierSpec }, config: Config = DEFAULTS): Result<{ hash: string }> {
+  settle(w, at, config)
+  const found = find(w, args.agent, args.module)
+  if (!found.ok) return found
+  const { a, m } = found.value
+  if (!isText(args.author, 40)) return invalid('badSpec', 'Verifiers need an author: the ID of the agent that wrote them.')
+  const problem = verifierProblem(args.verifiers, m.steps.length)
+  if (problem) return invalid('badSpec', problem)
+  if (!takes('verifiers', m.state)) return conflict('wrongState', `${m.id} has ${m.state === 'passed' ? 'passed' : 'been abandoned'}, so its verifiers can't change.`)
+  const current = verifiersOf(m)
+  if (current) return current.hash === args.verifiers.hash ? ok({ hash: current.hash }) : conflict('verifiersFrozen', `${m.id}'s verifiers are frozen. File a change request instead.`)
+  m.verifiers.push({ ...normalVerifiers(args.verifiers), author: args.author, frozenAt: at })
+  if (args.author === a.id) flag(m, 'selfAuthoredVerifiers', null, `Agent ${a.id} wrote the verifiers for ${m.id}, the module it works.`, at)
+  advance(w, a, at, config)
+  return ok({ hash: args.verifiers.hash })
+}
+
+export function fileChange(
+  w: World,
+  at: Ms,
+  args: { agent: string; module: string; reason: string; proposed: VerifierSpec },
+  config: Config = DEFAULTS,
+): Result<{ change: ChangeId }> {
+  settle(w, at, config)
+  const found = find(w, args.agent, args.module)
+  if (!found.ok) return found
+  const { a, m } = found.value
+  const current = verifiersOf(m)
+  if (!current) return conflict('verifiersMissing', `${m.id} has no verifiers to change. Submit them instead.`)
+  if (!takes('verifiers', m.state)) return conflict('wrongState', `${m.id} has ended, so its verifiers can't change.`)
+  if (!isText(args.reason, 300)) return invalid('badSpec', 'A change request needs a one-line reason.')
+  const problem = verifierProblem(args.proposed, m.steps.length)
+  if (problem) return invalid('badSpec', problem)
+  if (args.proposed.hash === current.hash) return invalid('badSpec', 'The proposed verifiers are the frozen ones.')
+  const same = m.changes.find((c) => c.state === 'open' && c.proposed.hash === args.proposed.hash)
+  if (same) return ok({ change: same.id })
+  w.changes++
+  const id = `c${w.changes}` as ChangeId
+  m.changes.push({ id, author: a.id, reason: args.reason.trim(), proposed: normalVerifiers(args.proposed), state: 'open', filedAt: at, decidedAt: null })
+  return ok({ change: id })
+}
+
+export function postAttempt(
+  w: World,
+  at: Ms,
+  args: { agent: string; module: string; attempt: string; commit: string; note: string },
+  config: Config = DEFAULTS,
+): Result<{ attempt: AttemptId; job: JobId }> {
+  settle(w, at, config)
+  const found = find(w, args.agent, args.module)
+  if (!found.ok) return found
+  const { a, p, m } = found.value
+  if (typeof args.attempt !== 'string' || !/^[A-Za-z0-9_.-]{1,60}$/.test(args.attempt)) return invalid('badSpec', 'An attemptId is 1 to 60 letters, digits, dots, dashes, or underscores.')
+  if (!isCommit(args.commit)) return invalid('badSpec', 'commit must be a commit hash.')
+  if (!isText(args.note, 500)) return invalid('badSpec', 'An attempt needs a one-line note.')
+  const commit = args.commit.toLowerCase() as Commit
+  const posted = m.attempts.find((x) => x.id === args.attempt)
+  if (posted) return posted.commit === commit ? ok({ attempt: posted.id, job: posted.job }) : conflict('attemptIdTaken', `Attempt ${posted.id} was posted with commit ${posted.commit}.`)
+  if (!takes('attempt', m.state)) return conflict('wrongState', `${m.id} is ${m.state}, so it takes no attempts.`)
+  const f = factsOf(p, m, at)
+  if (f.inFlight) return conflict('jobInFlight', `${m.id} already has a ${f.inFlight.kind} job in flight. Wait for it to finish.`)
+  if (f.deadline !== null && at >= f.deadline && f.last) return conflict('timeIsUp', `Time is up for ${m.id}, and its last attempt was ${f.last.id}.`)
+  if (commit === f.best) return conflict('alreadyBest', `${commit} is already ${m.id}'s best commit.`)
+
+  const step = f.step + 1
+  const job = queue(w, a, m, 'attempt', { step, commit, bestCommit: f.best!, stepTests: Array.from({ length: f.step }, (_, i) => i + 1) }, at)
+  const x: AttemptRec = { id: args.attempt as AttemptId, step, commit, note: args.note.trim(), bestCommit: f.best!, job: job.id, postedAt: at, judgedAt: null, judged: null }
+  m.attempts.push(x)
+  // The same job ran before, so its stored result stands
+  if (job.state !== 'queued') judgeAttempt(p, m, x, job, at, false)
+  settle(w, at, config)
+  return ok({ attempt: x.id, job: job.id })
+}
+
+export function stepDone(w: World, at: Ms, args: { agent: string; module: string; step: number }, config: Config = DEFAULTS): Result<{ job: JobId | null; done: boolean }> {
+  settle(w, at, config)
+  const found = find(w, args.agent, args.module)
+  if (!found.ok) return found
+  const { a, p, m } = found.value
+  const n = args.step
+  if (!Number.isInteger(n) || n < 1 || n > m.steps.length) return invalid('badSpec', `${m.id} has steps 1 to ${m.steps.length}.`)
+  if (m.steps[n - 1]!.doneAt !== null) return ok({ job: null, done: true })
+  if (!takes('stepCheck', m.state)) return conflict('wrongState', `${m.id} is ${m.state}, so it takes no step checks.`)
+  const f = factsOf(p, m, at)
+  if (f.inFlight?.kind === 'stepCheck' && f.inFlight.step === n) return ok({ job: f.inFlight.id, done: false })
+  if (f.inFlight) return conflict('jobInFlight', `${m.id} already has a ${f.inFlight.kind} job in flight. Wait for it to finish.`)
+  if (n !== f.step + 1) return conflict('wrongStep', `Step ${f.step + 1} is ${m.id}'s current step.`)
+  if (f.deadline !== null && at >= f.deadline) return conflict('timeIsUp', `Time is up for ${m.id}, so it takes no step checks.`)
+
+  const job = queue(w, a, m, 'stepCheck', { step: n, commit: f.head!, bestCommit: f.best!, stepTests: [n] }, at)
+  if (job.state !== 'queued') checkStep(m, job, at, false)
+  settle(w, at, config)
+  return ok({ job: job.id, done: m.steps[n - 1]!.doneAt !== null })
+}
+
+export function abandon(
+  w: World,
+  at: Ms,
+  args: { agent: string; module: string; reason: string; followUp?: ModuleSpec },
+  config: Config = DEFAULTS,
+): Result<{ followUp: ModuleId | null }> {
+  settle(w, at, config)
+  const found = find(w, args.agent, args.module)
+  if (!found.ok) return found
+  const { a, p, m } = found.value
+  if (m.state === 'abandoned') return ok({ followUp: m.followUp })
+  if (!takes('abandon', m.state)) return conflict('wrongState', `${m.id} is ${m.state}, and only a pending, active, or stuck module can be abandoned.`)
+  if (!isText(args.reason, 300)) return invalid('badSpec', 'The abandon reason is one sentence naming the assumption the attempts shared.')
+  const won = lastWin(m) !== null
+  const spec = args.followUp
+  if (won && !spec)
+    return invalid('followUpRequired', `${m.id} has a win, so abandoning it takes a follow-up built on its best commit: a retry with a smaller targetGain, or new steps.`)
+  if (!won && spec) return invalid('followUpNotAllowed', `${m.id} has no win to build on, so its commits are dropped. Add a new module instead.`)
+  if (spec) {
+    const problem = moduleProblem(spec, config)
+    if (problem) return invalid('badSpec', problem)
+    if (p.modules.some((x) => x.title === spec.title.trim())) return conflict('titleTaken', `Project "${p.title}" already has a module titled "${spec.title}".`)
+    if (spec.retryOf !== undefined) {
+      if (spec.retryOf !== m.id) return invalid('badSpec', `A follow-up can only retry the module it follows, ${m.id}.`)
+      if (m.retryOf !== null) return invalid('badSpec', `${m.id} is already a retry, so its follow-up can only build on it.`)
+      if (spec.goal.targetGain >= m.goal.targetGain) return invalid('badSpec', `A retry's targetGain must be below ${m.id}'s ${m.goal.targetGain}%.`)
+    }
+  }
+
+  const flight = m.jobs.find((j) => j.state === 'queued' || j.state === 'running')
+  if (flight) cancel(flight, at)
+  m.reason = args.reason.trim()
+  if (spec) {
+    const next = moduleFrom(a, spec, p.maxMinutes, config)
+    p.modules.splice(p.modules.indexOf(m) + 1, 0, next)
+    m.followUp = next.id
+  }
+  move(m, 'abandoned', at)
+  advance(w, a, at, config)
+  return ok({ followUp: m.followUp })
+}
+
+// Admin calls
+
+function findChange(w: World, id: string) {
+  for (const a of w.agents)
+    for (const p of a.project ? [a.project, ...a.past] : a.past)
+      for (const m of p.modules) {
+        const c = m.changes.find((x) => x.id === id)
+        if (c) return { a, p, m, c }
+      }
+  return null
+}
+
+export function decideChange(w: World, at: Ms, args: { change: string; approve: boolean }, config: Config = DEFAULTS): Result<{ state: 'approved' | 'rejected' }> {
+  settle(w, at, config)
+  const found = findChange(w, args.change)
+  if (!found) return notFound('noChange', `There is no change request ${args.change}.`)
+  const { a, m, c } = found
+  const state = args.approve ? 'approved' : 'rejected'
+  if (c.state !== 'open') return c.state === state ? ok({ state }) : conflict('changeDecided', `${c.id} was already ${c.state}.`)
+  if (args.approve && !takes('verifiers', m.state)) return conflict('wrongState', `${m.id} has ended, so its verifiers can't change. Reject the request instead.`)
+  if (args.approve) m.verifiers.push({ ...c.proposed, author: c.author, frozenAt: at })
+  c.state = state
+  c.decidedAt = at
+  advance(w, a, at, config)
+  return ok({ state })
+}
+
+export function replaceVerifiers(w: World, at: Ms, args: { agent: string; module: string; verifiers: VerifierSpec }, config: Config = DEFAULTS): Result<{ hash: string }> {
+  settle(w, at, config)
+  const found = find(w, args.agent, args.module)
+  if (!found.ok) return found
+  const { a, m } = found.value
+  const problem = verifierProblem(args.verifiers, m.steps.length)
+  if (problem) return invalid('badSpec', problem)
+  if (!takes('verifiers', m.state)) return conflict('wrongState', `${m.id} has ended, so its verifiers can't change.`)
+  if (verifiersOf(m)?.hash === args.verifiers.hash) return ok({ hash: args.verifiers.hash })
+  m.verifiers.push({ ...normalVerifiers(args.verifiers), author: 'admin', frozenAt: at })
+  advance(w, a, at, config)
+  return ok({ hash: args.verifiers.hash })
+}
+
+// Runner calls
+
+/** What a runner needs to run a job. */
+export interface Ticket {
+  job: JobId
+  kind: JobKind
+  agent: AgentId
+  module: ModuleId
+  step: number | null
+  /** The commits to benchmark, alternating in this order: the best commit first, then the one under test. */
+  commits: Commit[]
+  /** The commit whose tests run. */
+  commit: Commit
+  verifierHash: string
+  image: string
+  hardware: string
+  timeLimitMinutes: number
+  /** Test commands, regression tests first. */
+  tests: string[]
+  benchmark: string
+  runs: number
+  leaseUntil: Iso
+}
+
+export function claimJob(w: World, at: Ms, args: { runner: string; labels: string[] }, config: Config = DEFAULTS): Result<Ticket | null> {
+  settle(w, at, config)
+  if (!isText(args.runner, 60)) return invalid('badSpec', 'A runner needs a name.')
+  if (!Array.isArray(args.labels) || args.labels.length === 0 || !args.labels.every((l) => isText(l, 40))) return invalid('badSpec', 'A runner needs its hardware labels, such as cpu.')
+  // The oldest queued job whose hardware the runner has
+  const queued = w.agents.flatMap((a) => (a.project?.modules ?? []).flatMap((m) => m.jobs.filter((j) => j.state === 'queued').map((j) => ({ a, m, j }))))
+  const pick = queued
+    .filter(({ m, j }) => args.labels.includes(verifierSet(m, j.verifierHash)!.hardware))
+    .sort((x, y) => x.j.queuedAt - y.j.queuedAt || Number(x.j.id.slice(1)) - Number(y.j.id.slice(1)))[0]
+  if (!pick) return ok(null)
+  const { a, m, j } = pick
+  const leaseUntil = at + config.leaseMinutes * MINUTE
+  j.state = 'running'
+  j.claims.push({ runner: args.runner, at, leaseUntil, endedAt: null, lapsed: false })
+  const v = verifierSet(m, j.verifierHash)!
+  return ok({
+    job: j.id,
+    kind: j.kind,
+    agent: a.id,
+    module: m.id,
+    step: j.step,
+    commits: j.bestCommit === null || j.bestCommit === j.commit ? [j.commit] : [j.bestCommit, j.commit],
+    commit: j.commit,
+    verifierHash: v.hash,
+    image: v.image,
+    hardware: v.hardware,
+    timeLimitMinutes: v.timeLimitMinutes,
+    tests: [v.commands.regression, ...j.stepTests.map((n) => v.commands.steps[n - 1]!)],
+    benchmark: v.commands.benchmark,
+    runs: config.runs,
+    leaseUntil: iso(leaseUntil),
+  })
+}
+
+export function renewLease(w: World, at: Ms, args: { job: string; runner: string }, config: Config = DEFAULTS): Result<{ state: JobState; leaseUntil: Iso | null }> {
+  settle(w, at, config)
+  const found = findJob(w, args.job)
+  if (!found) return notFound('noJob', `There is no job ${args.job}.`)
+  const { j } = found
+  const claim = j.claims.at(-1)
+  if (!claim || claim.runner !== args.runner || claim.lapsed) return conflict('notYourJob', `${args.runner} doesn't hold ${j.id}. Its lease lapsed, or another runner holds it.`)
+  if (j.state !== 'running') return ok({ state: j.state, leaseUntil: null })
+  claim.leaseUntil = at + config.leaseMinutes * MINUTE
+  return ok({ state: j.state, leaseUntil: iso(claim.leaseUntil) })
+}
+
+function resultsProblem(r: JobResults | undefined, j: JobRec): string | null {
+  if (!r || typeof r !== 'object') return 'Results must be an object.'
+  if (!['done', 'killed', 'error'].includes(r.outcome)) return 'outcome must be done, killed, or error.'
+  const t = r.tests
+  if (t !== null && (typeof t !== 'object' || !Number.isInteger(t.passed) || !Number.isInteger(t.total) || t.passed < 0 || t.passed > t.total))
+    return 'tests must be null or whole numbers with passed no more than total.'
+  if (!Array.isArray(r.runs) || r.runs.length > 200) return 'runs must be a list of at most 200 runs.'
+  const commits = new Set([j.commit, j.bestCommit].filter(Boolean))
+  for (const run of r.runs) {
+    if (!run || typeof run.commit !== 'string' || !commits.has(run.commit.toLowerCase() as Commit)) return `Every run's commit must be one of the job's commits: ${[...commits].join(', ')}.`
+    if (!Number.isFinite(run.value) || !Number.isFinite(run.work) || run.work < 0) return "Every run needs a finite value and a work count that isn't negative."
+  }
+  if (!Array.isArray(r.touched) || !r.touched.every((x) => typeof x === 'string')) return 'touched must be a list of file paths.'
+  return null
+}
+
+export function sendResults(w: World, at: Ms, args: { job: string; runner: string; results: JobResults }, config: Config = DEFAULTS): Result<{ state: JobState }> {
+  settle(w, at, config)
+  const found = findJob(w, args.job)
+  if (!found) return notFound('noJob', `There is no job ${args.job}.`)
+  const { p, m, j } = found
+  // A repeat gets the stored result; a cancelled job's late result changes nothing
+  if (j.state === 'done' || j.state === 'killed' || j.state === 'failed' || j.state === 'cancelled') return ok({ state: j.state })
+  const claim = j.claims.at(-1)
+  if (j.state !== 'running' || !claim || claim.runner !== args.runner || claim.endedAt !== null) return conflict('notYourJob', `${args.runner} doesn't hold ${j.id}. Its lease lapsed, or another runner holds it.`)
+  const problem = resultsProblem(args.results, j)
+  if (problem) return invalid('badResults', problem)
+
+  const r = args.results
+  j.results = {
+    outcome: r.outcome,
+    tests: r.tests && { passed: r.tests.passed, total: r.tests.total },
+    runs: r.runs.map((run) => ({ commit: run.commit.toLowerCase() as Commit, value: run.value, work: run.work })),
+    touched: [...r.touched],
+    ...(r.error ? { error: String(r.error).slice(0, 500) } : {}),
+  }
+  j.state = r.outcome === 'done' ? 'done' : r.outcome === 'killed' ? 'killed' : 'failed'
+  j.finishedAt = at
+  claim.endedAt = at
+  apply(p, m, j, at, true)
+  settle(w, at, config)
+  return ok({ state: j.state })
+}

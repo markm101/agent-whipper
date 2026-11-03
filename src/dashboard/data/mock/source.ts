@@ -1,9 +1,11 @@
 import type { AttemptDetail, Board } from '../../../shared/api.ts'
 import type { BoardSource } from '../source.ts'
-import { attemptDetailOf, boardOf } from './derive.ts'
+import { settle } from '../../../server/domain/commands.ts'
+import type { World } from '../../../server/domain/records.ts'
+import { attemptDetailOf, boardOf } from '../../../server/domain/view.ts'
 import { initialWorld } from './fixtures.ts'
+import { MOCK_CONFIG } from './runner.ts'
 import { TIMELINE } from './timeline.ts'
-import { settle, type World } from './world.ts'
 
 export interface MockOptions {
   /** ms between timeline events. After the last one the board still refreshes at this pace. */
@@ -27,7 +29,7 @@ export function createMockSource({ every = 3500, now = Date.now }: MockOptions =
       event.run(world, at)
       next++
     }
-    settle(world, at)
+    settle(world, at, MOCK_CONFIG)
     board = boardOf(world, at)
     details = new Map()
     for (const listener of listeners) listener()

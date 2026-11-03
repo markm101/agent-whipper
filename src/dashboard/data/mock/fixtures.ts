@@ -1,53 +1,140 @@
-// Six agents' nights so far, replayed through the same calls the server
-// would take, so every derived number agrees with DESIGN.md. Times are minutes
+// Six agents' nights so far, replayed in time order through the server's own
+// commands, so every derived number agrees with DESIGN.md. Times are minutes
 // relative to t0, the moment the mock starts.
-import type { AgentId, Direction } from '../../../shared/api.ts'
-import { results, type Outcome, type ResultOptions } from './runner.ts'
-import {
-  MINUTE,
-  abandon,
-  addModule,
-  claimJob,
-  createProject,
-  fileChangeRequest,
-  freezeVerifiers,
-  landBaseline,
-  markStepDone,
-  postAttempt,
-  setBlurb,
-  settle,
-  type ModuleSpec,
-  type Ms,
-  type World,
-} from './world.ts'
+import type { Direction } from '../../../shared/api.ts'
+import { abandon, addModule, createProject, fileChange, freezeVerifiers, postAttempt, setBlurb, settle, stepDone } from '../../../server/domain/commands.ts'
+import { factsOf, firstInLine, locate, verifiersOf } from '../../../server/domain/queries.ts'
+import { MINUTE, emptyWorld, type ModuleSpec, type Ms, type VerifierSpec, type World } from '../../../server/domain/records.ts'
+import { MOCK_CONFIG, claim, finish, must, type BenchName, type Outcome, type ResultOptions } from './runner.ts'
 
-const goal = (metric: string, unit: string, direction: Direction, targetGain: number, ambitious = false) => ({ metric, unit, direction, targetGain, minGain: 2, ambitious })
-const steps = (...s: [string, number][]) => s.map(([title, tests]) => ({ title, tests }))
+/** A stable fake hash: FNV-1a over the seed, as hex. */
+export function hex(seed: string, length = 12): string {
+  let out = ''
+  for (let round = 0; out.length < length; round++) {
+    let h = 0x811c9dc5 ^ round
+    for (let i = 0; i < seed.length; i++) h = Math.imul(h ^ seed.charCodeAt(i), 0x01000193)
+    out += (h >>> 0).toString(16).padStart(8, '0')
+  }
+  return out.slice(0, length)
+}
 
-type Bench = ModuleSpec['bench']
-type Metric = { goal: (gain: number, ambitious?: boolean) => ModuleSpec['goal']; bench: Bench }
-const metric = (name: string, unit: string, direction: Direction, bench: Bench): Metric => ({ goal: (gain, ambitious) => goal(name, unit, direction, gain, ambitious), bench })
+/** A module spec, plus what the mock's verifiers need: its benchmark and test counts. */
+export interface Plan {
+  spec: ModuleSpec
+  bench: BenchName
+  regressionTests: number
+  stepTests: number[]
+}
 
-const LATENCY = metric('p95 latency', 'ms', 'lower', { spread: 1, work: 12_000 })
-const THROUGHPUT = metric('throughput', 'docs/s', 'higher', { spread: 6, work: 50_000 })
-const SUITE = metric('suite time', 's', 'lower', { spread: 2, work: 1_312 })
-const BUNDLE = metric('bundle size', 'kB', 'lower', { spread: 1, work: 2_310 })
-const DECODE = metric('decode speed', 'tok/s', 'higher', { spread: 4, work: 4_096 })
-const STARTUP = metric('startup time', 'ms', 'lower', { spread: 2, work: 200 })
+type Metric = { name: string; unit: string; direction: Direction; bench: BenchName }
+const LATENCY: Metric = { name: 'p95 latency', unit: 'ms', direction: 'lower', bench: 'latency' }
+const THROUGHPUT: Metric = { name: 'throughput', unit: 'docs/s', direction: 'higher', bench: 'ingest' }
+const SUITE: Metric = { name: 'suite time', unit: 's', direction: 'lower', bench: 'suite' }
+const BUNDLE: Metric = { name: 'bundle size', unit: 'kB', direction: 'lower', bench: 'bundle' }
+const DECODE: Metric = { name: 'decode speed', unit: 'tok/s', direction: 'higher', bench: 'decode' }
+const STARTUP: Metric = { name: 'startup time', unit: 'ms', direction: 'lower', bench: 'startup' }
 
 type Extra = { ambitious?: boolean; retryOf?: string }
-const spec = (m: Metric, id: string, title: string, gain: number, regressionTests: number, s: [string, number][], { ambitious, retryOf }: Extra = {}): ModuleSpec => ({
-  id,
-  title,
-  steps: steps(...s),
-  goal: m.goal(gain, ambitious),
-  regressionTests,
+const plan = (m: Metric, title: string, targetGain: number, regressionTests: number, steps: [string, number][], { ambitious, retryOf }: Extra = {}): Plan => ({
+  spec: {
+    title,
+    steps: steps.map(([s]) => s),
+    goal: { metric: m.name, unit: m.unit, direction: m.direction, targetGain, minGain: 2, ...(ambitious ? { ambitious } : {}) },
+    ...(retryOf ? { retryOf } : {}),
+  },
   bench: m.bench,
-  ...(retryOf ? { retryOf } : {}),
+  regressionTests,
+  stepTests: steps.map(([, n]) => n),
 })
 
+/** The mock's verifier files and commands for a plan. The runner reads its test counts off the commands. */
+export function verifiersFor(agent: string, p: Plan, hardware = 'cpu', version = 1): VerifierSpec {
+  return {
+    hash: hex(`${agent}:${p.spec.title}:verifiers:${version}`),
+    paths: [`bench/${p.bench}.ts`, 'test/regression.test.ts', ...p.stepTests.map((_, i) => `test/step-${i + 1}.test.ts`)],
+    image: 'node:26-slim',
+    commands: {
+      regression: `npm test -- regression  # ${p.regressionTests} tests`,
+      steps: p.stepTests.map((n, i) => `npm test -- step-${i + 1}  # ${n} tests`),
+      benchmark: `npm run bench -- ${p.bench}`,
+    },
+    hardware,
+    timeLimitMinutes: 20,
+  }
+}
+
+const runnerFor = (w: World, agent: string, module: string) => (verifiersOf(locate(w, agent, module)!.m)?.hardware === 'gpu' ? 'gpu-runner-1' : 'runner-1')
+
+/** In the mock, a runner picks up each baseline job the moment it's queued. */
+export function startBaselines(w: World, at: Ms) {
+  settle(w, at, MOCK_CONFIG)
+  for (const a of w.agents) {
+    const m = a.project && firstInLine(a.project)
+    if (m?.jobs.some((j) => j.kind === 'baseline' && j.state === 'queued')) claim(w, runnerFor(w, a.id, m.id), { agent: a.id, module: m.id, kind: 'baseline' }, at)
+  }
+}
+
+/** Lands a module's running baseline job at `value`. */
+export function landBaseline(w: World, agent: string, module: string, value: number, at: Ms) {
+  const job = locate(w, agent, module)!.m.jobs.find((j) => j.kind === 'baseline' && j.state === 'running')
+  if (!job) throw new Error(`agent ${agent} ${module} has no baseline job running`)
+  finish(w, job.id, { median: value }, {}, at)
+}
+
+/** Marks the current step done: queues the step check, and a runner runs it at once. */
+export function finishStep(w: World, agent: string, module: string, held: boolean, at: Ms) {
+  const { p, m } = locate(w, agent, module)!
+  must(stepDone(w, at, { agent, module, step: factsOf(p, m, at).step + 1 }, MOCK_CONFIG))
+  finish(w, claim(w, runnerFor(w, agent, module), { agent, module, kind: 'stepCheck' }, at), { held }, {}, at)
+}
+
+export const post = (w: World, agent: string, module: string, attempt: string, note: string, at: Ms) =>
+  must(postAttempt(w, at, { agent, module, attempt, commit: hex(`${agent}:${module}:${attempt}`), note }, MOCK_CONFIG))
+
+type Event = { at: Ms; run: (w: World, at: Ms) => void }
+type AttemptOptions = ResultOptions & { waited?: number; took?: number }
+
+function story(events: Event[], agent: string, t0: Ms) {
+  const on = (min: number, run: Event['run']) => events.push({ at: t0 + min * MINUTE, run })
+  const plans = new Map<string, Plan>()
+  return {
+    project(min: number, title: string, modules: Plan[], maxMinutes?: number) {
+      on(min, (w, at) => {
+        const spec = { title, startCommit: hex(`${agent}:${title}:start`), modules: modules.map((m) => m.spec), ...(maxMinutes ? { maxMinutes } : {}) }
+        const r = must(createProject(w, at, { agent, spec }, MOCK_CONFIG))
+        if (r.state === 'open') r.modules.forEach((id, i) => plans.set(id, modules[i]!))
+      })
+    },
+    add: (min: number, p: Plan) => on(min, (w, at) => plans.set(must(addModule(w, at, { agent, spec: p.spec }, MOCK_CONFIG)).module, p)),
+    verifiers(min: number, modules: string[], author = 'verifier', hardware = 'cpu') {
+      on(min, (w, at) => {
+        for (const m of modules) must(freezeVerifiers(w, at, { agent, module: m, author, verifiers: verifiersFor(agent, plans.get(m)!, hardware) }, MOCK_CONFIG))
+      })
+    },
+    baseline: (min: number, module: string, value: number) => on(min, (w, at) => landBaseline(w, agent, module, value, at)),
+    attempt(min: number, module: string, id: string, note: string, outcome: Outcome | null, opts: AttemptOptions = {}) {
+      const { waited = 0, took = 8 } = opts
+      on(min, (w, at) => post(w, agent, module, id, note, at))
+      let job: ReturnType<typeof claim> | undefined
+      on(min + waited, (w, at) => (job = claim(w, runnerFor(w, agent, module), { agent, module, kind: 'attempt' }, at)))
+      if (outcome) on(min + waited + took, (w, at) => finish(w, job!, outcome, opts, at))
+    },
+    step: (min: number, module: string, held = true) => on(min, (w, at) => finishStep(w, agent, module, held, at)),
+    abandon(min: number, module: string, reason: string, followUp: Plan | null = null) {
+      on(min, (w, at) => {
+        const r = must(abandon(w, at, { agent, module, reason, ...(followUp ? { followUp: followUp.spec } : {}) }, MOCK_CONFIG))
+        if (r.followUp && followUp) plans.set(r.followUp, followUp)
+      })
+    },
+    change(min: number, module: string, reason: string) {
+      on(min, (w, at) => must(fileChange(w, at, { agent, module, reason, proposed: verifiersFor(agent, plans.get(module)!, 'cpu', 2) }, MOCK_CONFIG)))
+    },
+    blurb: (min: number, text: string) => on(min, (w, at) => must(setBlurb(w, at, { agent, blurb: text }, MOCK_CONFIG))),
+  }
+}
+
 /** The follow-up agent 3 proposes when the timeline abandons fixture reuse. */
-export const ISOLATED_CONTEXTS = spec(SUITE, 'm3', 'isolated contexts', 5, 20, [
+export const ISOLATED_CONTEXTS = plan(SUITE, 'isolated contexts', 5, 20, [
   ['Pool browser contexts per test file', 4],
   ['Reset storage between tests', 3],
 ])
@@ -57,48 +144,31 @@ const TREE_SHAKING_STEPS: [string, number][] = [
   ['Split vendor chunks', 3],
 ]
 
-type AttemptOptions = ResultOptions & { waited?: number; took?: number; runner?: string }
+/** Agent 4's retry, whose verifiers the timeline freezes. */
+export const TREE_SHAKING_RETRY = plan(BUNDLE, 'tree shaking retry', 12, 18, TREE_SHAKING_STEPS, { retryOf: 'm1' })
 
-function story(w: World, agent: string, t0: Ms) {
-  const at = (min: number) => t0 + min * MINUTE
-  return {
-    verifiers(min: number, modules: string[], author = 'verifier', hardware = 'cpu') {
-      for (const m of modules) freezeVerifiers(w, agent, m, author, hardware, at(min))
-    },
-    baseline: (min: number, module: string, value: number) => landBaseline(w, agent, module, value, at(min)),
-    attempt(min: number, module: string, id: string, note: string, outcome: Outcome | null, opts: AttemptOptions = {}) {
-      const { waited = 0, took = 8, runner = 'runner-1' } = opts
-      postAttempt(w, agent, module, id, note, at(min))
-      claimJob(w, agent, module, id, runner, at(min + waited))
-      if (outcome) results(w, agent, module, id, outcome, opts, at(min + waited + took))
-    },
-    step: (min: number, module: string, held = true) => markStepDone(w, agent, module, held, at(min)),
-    abandon: (min: number, module: string, reason: string, followUp: ModuleSpec | null = null) => abandon(w, agent, module, reason, followUp, at(min)),
-  }
-}
-
-function searchPerf(w: World, t0: Ms) {
-  const s = story(w, '1', t0)
-  createProject(w, '1', 'search-perf', [
-    spec(LATENCY, 'm1', 'query cache', 10, 24, [
+function searchPerf(events: Event[], t0: Ms) {
+  const s = story(events, '1', t0)
+  s.project(-305, 'search-perf', [
+    plan(LATENCY, 'query cache', 10, 24, [
       ['Cache parsed queries', 6],
       ['Evict by memory size', 4],
       ['Warm the cache on start', 3],
     ]),
-    spec(LATENCY, 'm2', 'index layout', 10, 24, [
+    plan(LATENCY, 'index layout', 10, 24, [
       ['Block-compress postings', 5],
       ['Add skip-list headers', 4],
     ]),
-    spec(LATENCY, 'm3', 'result scoring', 8, 24, [
+    plan(LATENCY, 'result scoring', 8, 24, [
       ['Precompute field norms', 4],
       ['Score in batches', 4],
     ]),
-    spec(LATENCY, 'm4', 'response encoding', 5, 24, [
+    plan(LATENCY, 'response encoding', 5, 24, [
       ['Stream the JSON', 3],
       ['Drop unused fields', 2],
     ]),
   ])
-  createProject(w, '1', 'index-size', [])
+  s.project(-305, 'index-size', [plan(LATENCY, 'posting compression', 10, 24, [['Compress postings with PFOR', 5]])])
   s.verifiers(-302, ['m1', 'm2', 'm3', 'm4'])
   s.baseline(-300, 'm1', 415)
   s.attempt(-290, 'm1', 'a1', 'Cache parsed query trees by their text.', { median: 400 })
@@ -114,10 +184,9 @@ function searchPerf(w: World, t0: Ms) {
   s.attempt(-168, 'm2', 'a7', 'Add a skip-list header every 128 postings.', { failedTests: 2 })
   s.attempt(-150, 'm2', 'a8', 'Add a skip-list header every 64 postings.', { median: 384 })
   s.attempt(-132, 'm2', 'a9', 'Inline the headers into each block.', { failedTests: 1 })
-  addModule(
-    w,
-    '1',
-    spec(LATENCY, 'm5', 'early termination', 10, 24, [
+  s.add(
+    -110,
+    plan(LATENCY, 'early termination', 10, 24, [
       ['Skip low-impact terms', 5],
       ['Stop at the score bound', 4],
       ['Tune the bound', 3],
@@ -129,23 +198,23 @@ function searchPerf(w: World, t0: Ms) {
   s.attempt(-62, 'm5', 'a10', 'Skip terms with an idf below 1.5.', { median: 368 }, { waited: 4 })
   s.attempt(-40, 'm5', 'a11', 'Skip terms with an idf below 2.', { median: 352 })
   s.attempt(-6, 'm5', 'a12', 'Skip terms with an idf below 2.5.', null)
-  setBlurb(w, '1', 'Skipping low-impact query terms.')
+  s.blurb(-6, 'Skipping low-impact query terms.')
 }
 
-function ingestRate(w: World, t0: Ms) {
-  const s = story(w, '2', t0)
-  createProject(w, '2', 'ingest-rate', [
-    spec(THROUGHPUT, 'm1', 'batch writes', 10, 30, [
+function ingestRate(events: Event[], t0: Ms) {
+  const s = story(events, '2', t0)
+  s.project(-210, 'ingest-rate', [
+    plan(THROUGHPUT, 'batch writes', 10, 30, [
       ['Batch inserts', 6],
       ['Group commits', 5],
     ]),
-    spec(THROUGHPUT, 'm2', 'parse pool', 12, 30, [
+    plan(THROUGHPUT, 'parse pool', 12, 30, [
       ['Parse on worker threads', 6],
       ['Size the pool to the cores', 3],
       ['Reuse parser buffers', 4],
       ['Pin hot workers', 3],
     ]),
-    spec(THROUGHPUT, 'm3', 'zero-copy reads', 8, 30, [
+    plan(THROUGHPUT, 'zero-copy reads', 8, 30, [
       ['Map files into memory', 4],
       ['Parse in place', 5],
     ]),
@@ -164,18 +233,18 @@ function ingestRate(w: World, t0: Ms) {
   s.attempt(-68, 'm2', 'a7', 'Size the pool to the physical cores.', { median: 2035 })
   s.step(-50, 'm2')
   s.attempt(-40, 'm2', 'a8', 'Reuse parser buffers per worker.', { median: 2140 })
-  fileChangeRequest(w, '2', 'm2')
-  setBlurb(w, '2', 'Reusing parser buffers across batches.')
+  s.change(-30, 'm2', 'The ingest benchmark reads its corpus from a cold cache only on the first run.')
+  s.blurb(-30, 'Reusing parser buffers across batches.')
 }
 
-function testSpeed(w: World, t0: Ms) {
-  const s = story(w, '3', t0)
-  createProject(w, '3', 'test-speed', [
-    spec(SUITE, 'm1', 'parallel workers', 10, 20, [
+function testSpeed(events: Event[], t0: Ms) {
+  const s = story(events, '3', t0)
+  s.project(-255, 'test-speed', [
+    plan(SUITE, 'parallel workers', 10, 20, [
       ['Split the suite by file', 4],
       ['Balance shards by duration', 3],
     ]),
-    spec(SUITE, 'm2', 'fixture reuse', 8, 20, [
+    plan(SUITE, 'fixture reuse', 8, 20, [
       ['Share database fixtures', 5],
       ['Reuse browser contexts', 4],
     ]),
@@ -191,14 +260,14 @@ function testSpeed(w: World, t0: Ms) {
   s.attempt(-140, 'm2', 'a5', 'Share one browser context per worker.', { failedTests: 3 }, { took: 10 })
   s.attempt(-120, 'm2', 'a6', 'Share contexts and clear cookies between files.', { median: 612 }, { took: 10 })
   s.attempt(-100, 'm2', 'a7', 'Share contexts and reset local storage too.', { failedTests: 2 }, { took: 10 })
-  setBlurb(w, '3', 'Reusing browser contexts across test files.')
+  s.blurb(-90, 'Reusing browser contexts across test files.')
 }
 
-function bundleSize(w: World, t0: Ms) {
-  const s = story(w, '4', t0)
-  createProject(w, '4', 'bundle-size', [
-    spec(BUNDLE, 'm1', 'tree shaking', 25, 18, TREE_SHAKING_STEPS, { ambitious: true }),
-    spec(BUNDLE, 'm2', 'lazy routes', 10, 18, [
+function bundleSize(events: Event[], t0: Ms) {
+  const s = story(events, '4', t0)
+  s.project(-155, 'bundle-size', [
+    plan(BUNDLE, 'tree shaking', 25, 18, TREE_SHAKING_STEPS, { ambitious: true }),
+    plan(BUNDLE, 'lazy routes', 10, 18, [
       ['Load routes on demand', 4],
       ['Prefetch on hover', 2],
     ]),
@@ -211,32 +280,25 @@ function bundleSize(w: World, t0: Ms) {
   s.attempt(-112, 'm1', 'a3', 'Split vendors by package.', { median: 1148 }, { took: 5 })
   s.attempt(-100, 'm1', 'a4', 'Split vendors by route.', { median: 1149 }, { took: 5 })
   s.step(-92, 'm1')
-  s.abandon(
-    -20,
-    'm1',
-    'Every attempt assumed most of the bundle was dead code, but the largest packages are mostly reachable.',
-    spec(BUNDLE, 'm3', 'tree shaking retry', 12, 18, TREE_SHAKING_STEPS, { retryOf: 'm1' }),
-  )
-  setBlurb(w, '4', 'Retrying tree shaking with a 12% target.')
+  s.abandon(-20, 'm1', 'Every attempt assumed most of the bundle was dead code, but the largest packages are mostly reachable.', TREE_SHAKING_RETRY)
+  s.blurb(-20, 'Retrying tree shaking with a 12% target.')
 }
 
-function decodeSpeed(w: World, t0: Ms) {
-  const s = story(w, '5', t0)
-  const gpu = { runner: 'gpu-runner-1' }
-  createProject(
-    w,
-    '5',
+function decodeSpeed(events: Event[], t0: Ms) {
+  const s = story(events, '5', t0)
+  s.project(
+    -145,
     'decode-speed',
     [
-      spec(DECODE, 'm1', 'fused attention', 10, 16, [
+      plan(DECODE, 'fused attention', 10, 16, [
         ['Fuse the softmax', 6],
         ['Fuse the projection', 4],
       ]),
-      spec(DECODE, 'm2', 'kv cache paging', 10, 16, [
+      plan(DECODE, 'kv cache paging', 10, 16, [
         ['Page the KV cache', 5],
         ['Prefetch the next page', 4],
       ]),
-      spec(DECODE, 'm3', 'speculative decoding', 15, 16, [
+      plan(DECODE, 'speculative decoding', 15, 16, [
         ['Draft with a small model', 5],
         ['Verify drafts in batches', 4],
       ]),
@@ -245,33 +307,33 @@ function decodeSpeed(w: World, t0: Ms) {
   )
   s.verifiers(-142, ['m1', 'm2', 'm3'], 'verifier', 'gpu')
   s.baseline(-140, 'm1', 1520)
-  s.attempt(-130, 'm1', 'a1', 'Fuse the softmax into the attention kernel.', { median: 1580 }, gpu)
-  s.attempt(-115, 'm1', 'a2', 'Fold the scale into the softmax.', { median: 1640 }, gpu)
+  s.attempt(-130, 'm1', 'a1', 'Fuse the softmax into the attention kernel.', { median: 1580 })
+  s.attempt(-115, 'm1', 'a2', 'Fold the scale into the softmax.', { median: 1640 })
   s.step(-100, 'm1')
-  s.attempt(-92, 'm1', 'a3', 'Fuse the output projection.', { median: 1690 }, gpu)
+  s.attempt(-92, 'm1', 'a3', 'Fuse the output projection.', { median: 1690 })
   s.baseline(-65, 'm2', 1690)
-  s.attempt(-60, 'm2', 'a4', 'Page the cache in 16-token blocks.', { median: 1700 }, { ...gpu, waited: 3, took: 7 })
-  s.attempt(-45, 'm2', 'a5', 'Page the cache in 64-token blocks.', { median: 1745 }, { ...gpu, took: 7 })
-  s.attempt(-32, 'm2', 'a6', 'Page the cache in 128-token blocks.', { median: 1752 }, { ...gpu, took: 7 })
-  s.attempt(-18, 'm2', 'a7', 'Keep the first page resident.', { median: 1749 }, { ...gpu, took: 7 })
-  setBlurb(w, '5', 'Paging the KV cache in 64-token blocks.')
+  s.attempt(-60, 'm2', 'a4', 'Page the cache in 16-token blocks.', { median: 1700 }, { waited: 3, took: 7 })
+  s.attempt(-45, 'm2', 'a5', 'Page the cache in 64-token blocks.', { median: 1745 }, { took: 7 })
+  s.attempt(-32, 'm2', 'a6', 'Page the cache in 128-token blocks.', { median: 1752 }, { took: 7 })
+  s.attempt(-18, 'm2', 'a7', 'Keep the first page resident.', { median: 1749 }, { took: 7 })
+  s.blurb(-18, 'Paging the KV cache in 64-token blocks.')
 }
 
-function coldStart(w: World, t0: Ms) {
-  const s = story(w, '6', t0)
-  createProject(w, '6', 'cold-start', [
-    spec(STARTUP, 'm1', 'lazy imports', 15, 30, [
+function coldStart(events: Event[], t0: Ms) {
+  const s = story(events, '6', t0)
+  s.project(-125, 'cold-start', [
+    plan(STARTUP, 'lazy imports', 15, 30, [
       ['Defer plugin imports', 8],
       ['Lazy-load the config schema', 6],
       ['Snapshot the module graph', 5],
     ]),
-    spec(STARTUP, 'm2', 'precompiled templates', 8, 30, [
+    plan(STARTUP, 'precompiled templates', 8, 30, [
       ['Compile templates at build time', 4],
       ['Cache compiled templates', 3],
     ]),
   ])
-  createProject(w, '6', 'memory-peak', [])
-  createProject(w, '6', 'gc-pauses', [])
+  s.project(-125, 'memory-peak', [plan(STARTUP, 'arena allocation', 10, 30, [['Allocate parse trees in an arena', 5]])])
+  s.project(-125, 'gc-pauses', [plan(STARTUP, 'incremental marking', 10, 30, [['Mark the heap in slices', 5]])])
   s.verifiers(-122, ['m1'], '6')
   s.verifiers(-122, ['m2'])
   s.baseline(-115, 'm1', 940)
@@ -280,12 +342,20 @@ function coldStart(w: World, t0: Ms) {
   s.step(-80, 'm1')
   s.attempt(-72, 'm1', 'a3', 'Load the schema from a prebuilt JSON file.', { failedTests: 2 }, { took: 6 })
   s.attempt(-58, 'm1', 'a4', 'Load the schema on the first validate call.', { median: 869 }, { took: 6, testsTotal: 34 })
-  setBlurb(w, '6', 'Lazy-loading the config schema.')
+  s.blurb(-58, 'Lazy-loading the config schema.')
 }
 
 export function initialWorld(t0: Ms): World {
-  const w: World = { agents: ['1', '2', '3', '4', '5', '6'].map((id) => ({ id: id as AgentId, blurb: '', project: null, queued: [] })) }
-  for (const build of [searchPerf, ingestRate, testSpeed, bundleSize, decodeSpeed, coldStart]) build(w, t0)
-  settle(w, t0)
+  const w = emptyWorld()
+  const events: Event[] = []
+  for (const build of [searchPerf, ingestRate, testSpeed, bundleSize, decodeSpeed, coldStart]) build(events, t0)
+  events.sort((x, y) => x.at - y.at)
+  // The board lists agents in the order they first called
+  for (const id of ['1', '2', '3', '4', '5', '6']) must(setBlurb(w, events[0]!.at, { agent: id, blurb: '' }, MOCK_CONFIG))
+  for (const e of events) {
+    e.run(w, e.at)
+    startBaselines(w, e.at)
+  }
+  settle(w, t0, MOCK_CONFIG)
   return w
 }
