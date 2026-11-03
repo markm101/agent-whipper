@@ -166,10 +166,10 @@ async function rig(name: string, executor: Executor, image: string, files: Recor
     return (await res.json()) as Record<string, any>
   }
   const deps: JobDeps = { api: createApi(base, TOKENS.runner), executor, ...pick(createGit(join(root, `${name}-repos`))), runner: `${name}-runner`, work: join(root, `${name}-work`), defaultRepo: null, renewEveryMs: 1000, log: () => {} }
-  const next = async () => {
+  const next = async (signal?: AbortSignal) => {
     const job = await deps.api.claim(deps.runner, ['cpu'])
     assert.ok(job, 'a job to run')
-    await runJob(job, deps)
+    await runJob(job, deps, signal)
   }
   const stop = async () => {
     await new Promise<void>((done) => {
@@ -232,6 +232,23 @@ test('a process a command leaves running doesn’t outlive it', { skip: !hasBusy
     await rr.start(r.url, r.start)
     await rr.next()
     assert.equal((await rr.module()).goal.baseline, 100)
+  } finally {
+    await rr.stop()
+  }
+})
+
+test('a runner that is told to stop drops its job instead of finishing it', async () => {
+  const r = repo('stopping')
+  // A benchmark slow enough to stop in the middle of
+  const files = { 'bench.sh': `sleep 0.3; echo "{\\"value\\": $(cat value.txt), \\"work\\": 1}"` }
+  const rr = await rig('stopping', localExecutor, 'unused', files, 'sh bench.sh', 'true')
+  try {
+    await rr.start(r.url, r.start)
+    // The stop lands between commands, before this job's first one: it must drop the job, not finish it
+    const stop = new AbortController()
+    stop.abort()
+    await rr.next(stop.signal)
+    assert.equal((await rr.module()).status.state, 'pending', 'the baseline never landed')
   } finally {
     await rr.stop()
   }

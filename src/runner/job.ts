@@ -111,6 +111,8 @@ export async function runJob(t: Claimed, d: JobDeps, stop?: AbortSignal): Promis
   // Stopping the runner abandons the job; its lease lapses and another runner takes it
   const onStop = () => lost.abort()
   stop?.addEventListener('abort', onStop, { once: true })
+  // A stop that already happened won't fire its event
+  if (stop?.aborted) lost.abort()
   const deadline = Date.now() + t.timeLimitMinutes * 60_000
   const boxes: Box[] = []
   const renew = setInterval(() => {
@@ -121,6 +123,7 @@ export async function runJob(t: Claimed, d: JobDeps, stop?: AbortSignal): Promis
   }, d.renewEveryMs)
 
   const exec = async (box: Box, command: string) => {
+    if (lost.signal.aborted) throw new Lost()
     const left = deadline - Date.now()
     if (left <= 0) throw new Killed()
     const r = await box.exec(command, left, lost.signal)
@@ -155,6 +158,7 @@ export async function runJob(t: Claimed, d: JobDeps, stop?: AbortSignal): Promis
 
     const box = new Map<string, Box>()
     for (const c of commits) {
+      if (lost.signal.aborted) throw new Lost()
       const b = await d.executor.open(dirs.get(c)!, t)
       boxes.push(b)
       box.set(c, b)

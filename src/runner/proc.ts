@@ -14,6 +14,8 @@ const KEEP = 1024 * 1024
 
 export function run(command: string, args: string[], opts: SpawnOptions & { timeoutMs?: number; signal?: AbortSignal; input?: string } = {}): Promise<Exit> {
   const { timeoutMs, signal, input, ...spawnOpts } = opts
+  // An abort that already happened won't fire its event again, so check before starting anything
+  if (signal?.aborted) return Promise.resolve({ code: null, stdout: '', stderr: '', timedOut: false, aborted: true })
   return new Promise((resolve) => {
     const child = spawn(command, args, { ...spawnOpts, stdio: ['pipe', 'pipe', 'pipe'] })
     let stdout = ''
