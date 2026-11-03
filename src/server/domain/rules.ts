@@ -51,13 +51,18 @@ export const TARGET_CAP = 20
 export const DEFAULT_MIN_GAIN = 2
 export const FAILED_TURNS = 3
 export const GRACE_SHARE = 0.1
+/** Runs of a job the runner couldn't run before it stops trying. */
+export const MAX_RUNNER_ERRORS = 3
+/** How long past its time limit a runner can hold a job before the server takes it back. */
+export const HOLD_GRACE_MINUTES = 30
 
 // Spec checks. Each returns the problem as a sentence, or null. They check
 // types too, because the HTTP layer passes parsed JSON straight through.
 
 export const isText = (x: unknown, max = 200): x is string => typeof x === 'string' && x.trim().length > 0 && x.length <= max && !/[\r\n]/.test(x)
 const number = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x)
-export const isCommit = (x: unknown): x is string => typeof x === 'string' && /^[0-9a-f]{7,64}$/i.test(x)
+/** A full commit hash, SHA-1 or SHA-256. Abbreviations would let one commit pass as two. */
+export const isCommit = (x: unknown): x is string => typeof x === 'string' && /^([0-9a-f]{40}|[0-9a-f]{64})$/i.test(x)
 export const isAgentId = (x: unknown): x is string => typeof x === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(x)
 
 export function maxMinutesProblem(x: unknown, config: Config): string | null {
@@ -103,7 +108,7 @@ export function moduleProblem(s: ModuleSpec | undefined, config: Config): string
 export function projectProblem(s: ProjectSpec | undefined, config: Config): string | null {
   if (!s || typeof s !== 'object') return 'A project spec must be an object.'
   if (!isText(s.title, 80)) return 'A project needs a one-line title.'
-  if (!isCommit(s.startCommit)) return 'startCommit must be a commit hash.'
+  if (!isCommit(s.startCommit)) return 'startCommit must be a full commit hash, such as the output of git rev-parse HEAD.'
   if (s.repo !== undefined && (!isText(s.repo, 300) || /\s/.test(s.repo))) return 'repo must be a git remote URL.'
   if (!Array.isArray(s.modules) || s.modules.length === 0) return 'A project needs at least one module.'
   if (s.modules.length > 50) return 'A project can have at most 50 modules.'
@@ -122,7 +127,7 @@ export function verifierProblem(v: VerifierSpec | undefined, steps: number): str
   if (!v || typeof v !== 'object') return 'Verifiers must be an object.'
   if (!isText(v.hash, 128)) return 'The verifiers need a hash.'
   if (!Array.isArray(v.paths) || v.paths.length === 0 || !v.paths.every((p) => isText(p, 300))) return 'The verifiers need the paths of their files.'
-  if (!isText(v.image, 200)) return 'The verifiers need a container image.'
+  if (!isText(v.image, 200) || !/^[A-Za-z0-9][A-Za-z0-9._/:@-]*$/.test(v.image)) return 'The verifiers need a container image, such as node:26-slim.'
   const c = v.commands
   if (!c || !isText(c.regression, 500) || !isText(c.benchmark, 500)) return 'The verifiers need a regression test command and a benchmark command.'
   if (!Array.isArray(c.steps) || c.steps.length !== steps || !c.steps.every((x) => isText(x, 500))) return `The verifiers need one test command for each of the module's ${steps} steps.`

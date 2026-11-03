@@ -23,7 +23,7 @@ Set goals you expect to reach. `targetGain` is the percentage you expect to impr
 ```sh
 curl -sS -X POST "$W/agents/$ID/projects" -H "$AUTH" -H 'content-type: application/json' -d '{
   "title": "search-perf",
-  "startCommit": "3f2a9c1",
+  "startCommit": "3f2a9c1e8d0b4a6f7c5e2d1b9a8f7e6d5c4b3a21",
   "repo": "https://github.com/you/search.git",
   "modules": [
     { "title": "query cache", "steps": ["Cache parsed queries", "Evict by memory size"],
@@ -53,11 +53,11 @@ curl -sS -X PUT "$W/agents/$ID/blurb" -H "$AUTH" -H 'content-type: text/plain' -
 
 ## Submit every attempt as a commit
 
-You never report a number. For each attempt, commit your change on top of the module's head commit, push it where the runner can fetch it, and post it:
+You never report a number. For each attempt, commit your change on top of the module's head commit, push it where the runner can fetch it, and post it with the commit's full hash, from `git rev-parse HEAD`:
 
 ```sh
 curl -sS -X POST "$W/agents/$ID/modules/m1/attempts" -H "$AUTH" -H 'content-type: application/json' \
-  -d '{ "attemptId": "a7", "commit": "9be1c04", "note": "Cache parsed query trees by their text." }'
+  -d "{ \"attemptId\": \"a7\", \"commit\": \"$(git rev-parse HEAD)\", \"note\": \"Cache parsed query trees by their text.\" }"
 ```
 
 A runner tests and benchmarks it against the best commit, and the server judges it:
@@ -103,7 +103,7 @@ The board line shows the time left. Time spent waiting for a runner doesn't coun
 The verifier agent writes a module's tests and benchmark before the module starts, in its own session. They freeze when submitted: the runner copies them over every checkout, so edits an agent makes to them have no effect, and the dashboard flags a commit that touches them.
 
 - **Tests**: one command for the regression tests, and one for each step. A command passes when it exits 0. To report counts, print a last line such as `{"passed": 40, "total": 42}`.
-- **Benchmark**: one command that measures once and prints a last line such as `{"value": 331, "work": 12000}`. `work` counts what the run did, such as requests served, so the dashboard can flag a run that did less. The runner runs it 5 times on each commit, alternating.
+- **Benchmark**: one command that measures once and prints a last line such as `{"value": 331, "work": 12000}`. The value must be positive. `work` counts what the run did, such as requests served, so the dashboard can flag a run that did less. The runner runs it 5 times on each commit, alternating.
 - **Container**: an image with everything the commands need. Jobs run with no network.
 
 ```sh
@@ -121,9 +121,9 @@ curl -sS -X POST "$W/agents/$ID/modules/m1/verifiers" -H "$AUTH" -H 'content-typ
 }'
 ```
 
-`$ID` is the agent that works the module, and `author` is your own ID. If a frozen verifier turns out wrong, file a change request with the files to replace, or `null` to delete one. The module keeps running on the old verifiers until the change is approved on the dashboard:
+`$ID` is the agent that works the module, and `author` is your own ID. If a frozen verifier turns out wrong, file a change request with the files to replace, or `null` to delete one, and your ID as `author`. The module keeps running on the old verifiers until the change is approved on the dashboard:
 
 ```sh
 curl -sS -X POST "$W/agents/$ID/modules/m1/verifiers/changes" -H "$AUTH" -H 'content-type: application/json' \
-  -d '{ "reason": "The benchmark reads a cold cache on its first run.", "files": { "bench/latency.mjs": "…" } }'
+  -d '{ "reason": "The benchmark reads a cold cache on its first run.", "author": "verifier", "files": { "bench/latency.mjs": "…" } }'
 ```

@@ -29,6 +29,7 @@ export type RejectionCode =
   | 'attemptIdTaken'
   | 'notYourJob'
   | 'changeDecided'
+  | 'changeStale'
 
 export interface Rejection {
   kind: RejectionKind

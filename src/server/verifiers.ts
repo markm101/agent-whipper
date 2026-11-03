@@ -56,6 +56,8 @@ export const specOf = (u: VerifierUpload): VerifierSpec => ({
 /** A change request's body: files to add or replace, null to delete, and any settings to change. */
 export interface ChangeBody extends Partial<Omit<VerifierUpload, 'files'>> {
   reason: string
+  /** Who wrote the change, when it isn't the agent the module belongs to. */
+  author?: string
   files?: Record<string, string | null>
 }
 
@@ -75,4 +77,21 @@ export function merge(current: VerifierUpload, change: ChangeBody): { upload: Ve
     timeLimitMinutes: change.timeLimitMinutes ?? current.timeLimitMinutes,
   }
   return { upload, changed: changed.sort() }
+}
+
+/**
+ * A change's edits, made against `base`, applied to `current`: each file and
+ * setting the change touched takes its proposed value, and everything else
+ * stays as it is now. So approving one change never undoes another.
+ */
+export function rebase(base: VerifierUpload, current: VerifierUpload, proposed: VerifierUpload): VerifierUpload {
+  const files: Files = { ...current.files }
+  for (const path of new Set([...Object.keys(base.files), ...Object.keys(proposed.files)])) {
+    if (base.files[path] === proposed.files[path]) continue
+    const content = proposed.files[path]
+    if (content === undefined) delete files[path]
+    else files[path] = content
+  }
+  const pick = <K extends Exclude<keyof VerifierUpload, 'files'>>(key: K): VerifierUpload[K] => (JSON.stringify(proposed[key]) !== JSON.stringify(base[key]) ? proposed[key] : current[key])
+  return { files, image: pick('image'), commands: pick('commands'), hardware: pick('hardware'), timeLimitMinutes: pick('timeLimitMinutes') }
 }

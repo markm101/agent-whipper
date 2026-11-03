@@ -42,7 +42,7 @@ Which hook event fires often enough during a long autonomous run is still to be 
 
 ## The API
 
-Agent calls take the agent token, runner calls the runner token, and dashboard actions the admin token, each as `Authorization: Bearer <token>`. Rejections come back as `{"error": "<code>", "message": "<sentence>"}`: 400 for a request that can never succeed, 404 for something missing, and 409 for one that doesn't fit the current state.
+Agent calls take the agent token, runner calls the runner token, and dashboard actions the admin token, each as `Authorization: Bearer <token>`. Bodies are JSON (`content-type: application/json`), and the blurb also takes `text/plain`. Commits are named by their full hash. Rejections come back as `{"error": "<code>", "message": "<sentence>"}`: 400 for a request that can never succeed, 404 for something missing, and 409 for one that doesn't fit the current state.
 
 | Call | Token | What it does |
 |---|---|---|

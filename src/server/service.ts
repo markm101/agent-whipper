@@ -16,6 +16,12 @@ export interface Service {
   config: Config
 }
 
+/** Long strings and lists cut short, so one oversized request can't bloat the log. */
+function clip(args: unknown): unknown {
+  const text = JSON.stringify(args ?? null, (_, v: unknown) => (typeof v === 'string' && v.length > 300 ? `${v.slice(0, 300)}…` : Array.isArray(v) && v.length > 50 ? [...v.slice(0, 50), '…'] : v))
+  return text.length > 20_000 ? { clipped: text.slice(0, 20_000) } : (JSON.parse(text) as unknown)
+}
+
 export function createService(store: Store, config: Config = DEFAULTS, clock: () => Ms = Date.now): Service {
   let world = store.load()
 
@@ -37,7 +43,7 @@ export function createService(store: Store, config: Config = DEFAULTS, clock: ()
         const r = run(world, at, config)
         store.save(world)
         // A runner polling an empty queue changes nothing worth a log row
-        if (!(call === 'claimJob' && r.ok && r.value === null)) store.log({ at, call, args, outcome: r.ok ? 'ok' : r.rejection.code })
+        if (!(call === 'claimJob' && r.ok && r.value === null)) store.log({ at, call, args: clip(args), outcome: r.ok ? 'ok' : r.rejection.code })
         return r
       })
     },

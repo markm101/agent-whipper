@@ -4,7 +4,7 @@ import { FlagList } from '../components/ModulePanel.tsx'
 import { PageHead } from '../components/PageHead.tsx'
 import { Badge, Icon, Spinner, VerdictDot } from '../components/parts.tsx'
 import { useAttemptDetail, useBoard } from '../data/hooks.tsx'
-import { VERDICT, figure, gainWords, pWords, plural, short, withUnit } from '../view/format.ts'
+import { JOB, VERDICT, figure, gainWords, pWords, plural, short, withUnit } from '../view/format.ts'
 import { agentPath } from '../view/routes.ts'
 import { NotFound } from './NotFound.tsx'
 import './attempt.css'
@@ -18,7 +18,7 @@ function JobBadge({ d }: { d: AttemptDetail }) {
       </Badge>
     )
   if (job === 'queued') return <Badge>Queued for a runner</Badge>
-  if (!d.attempt.verdict) return <Badge>Cancelled</Badge>
+  if (!d.attempt.verdict) return <Badge>{JOB[job]}</Badge>
   return <Badge dot>Judged</Badge>
 }
 

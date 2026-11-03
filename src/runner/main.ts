@@ -1,6 +1,7 @@
 // whip-runner: claims jobs from whip-server one at a time and runs each in
 // throwaway containers. Configured by environment variables; see .env.example.
 import { hostname } from 'node:os'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { resolve } from 'node:path'
 import { dockerExecutor, localExecutor } from './exec.ts'
 import { createGit } from './git.ts'
@@ -24,8 +25,9 @@ if (local) console.warn('WHIP_EXECUTOR=local runs jobs on this machine without a
 const git = createGit(resolve(work, 'repos'), env.WHIP_GIT_PROTOCOLS)
 const deps: JobDeps = {
   api: createApi(server, need('WHIP_RUNNER_TOKEN')),
-  executor: local ? localExecutor : dockerExecutor({ ...(env.WHIP_CPUSET ? { cpuset: env.WHIP_CPUSET } : {}), ...(env.WHIP_MEMORY ? { memory: env.WHIP_MEMORY } : {}) }),
+  executor: local ? localExecutor : dockerExecutor({ runner, ...(env.WHIP_CPUSET ? { cpuset: env.WHIP_CPUSET } : {}), ...(env.WHIP_MEMORY ? { memory: env.WHIP_MEMORY } : {}) }),
   checkout: git.checkout,
+  changed: git.changed,
   runner,
   work,
   defaultRepo: env.WHIP_REPO?.trim() || null,
@@ -33,28 +35,30 @@ const deps: JobDeps = {
   log: (m) => console.log(`[${new Date().toISOString()}] ${m}`),
 }
 
-let stopping = false
+// Stopping abandons the current job and removes its containers; its lease lapses and another runner takes it
+const stop = new AbortController()
 for (const signal of ['SIGINT', 'SIGTERM'] as const)
   process.on(signal, () => {
-    // A job cut short is requeued when its lease lapses
-    if (stopping) process.exit(1)
-    stopping = true
-    deps.log('stopping after the current job; signal again to stop now')
+    if (stop.signal.aborted) process.exit(1)
+    deps.log('stopping')
+    stop.abort()
   })
 
+const swept = (await deps.executor.sweep?.()) ?? 0
+if (swept) deps.log(`removed ${swept} containers a previous run left behind`)
 deps.log(`${runner} claiming ${labels.join(', ')} jobs from ${server}`)
-while (!stopping) {
+while (!stop.signal.aborted) {
   try {
     const job = await deps.api.claim(runner, labels)
     if (!job) {
-      await new Promise((r) => setTimeout(r, pollMs))
+      await sleep(pollMs, null, { signal: stop.signal }).catch(() => {})
       continue
     }
     deps.log(`running ${job.job}: ${job.kind} for agent ${job.agent} ${job.module}`)
-    await runJob(job, deps)
+    await runJob(job, deps, stop.signal)
     deps.log(`finished ${job.job}`)
   } catch (e) {
     deps.log(`error: ${(e as Error).message}`)
-    await new Promise((r) => setTimeout(r, pollMs))
+    await sleep(pollMs, null, { signal: stop.signal }).catch(() => {})
   }
 }

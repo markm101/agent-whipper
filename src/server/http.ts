@@ -10,12 +10,13 @@ import { extname, join, resolve, sep } from 'node:path'
 import type { AgentId, AttemptId, ModuleId } from '../shared/api.ts'
 import * as cmd from './domain/commands.ts'
 import { locate, verifiersOf } from './domain/queries.ts'
-import type { JobResults, ModuleSpec, ProjectSpec } from './domain/records.ts'
+import type { JobResults, ModuleSpec, ProjectSpec, VerifierSpec } from './domain/records.ts'
 import type { Result } from './domain/result.ts'
 import { verifierProblem } from './domain/rules.ts'
 import * as view from './domain/view.ts'
 import type { Service } from './service.ts'
-import { filesProblem, merge, specOf, type ChangeBody, type VerifierUpload } from './verifiers.ts'
+import type { Files } from './store.ts'
+import { filesProblem, merge, rebase, specOf, type ChangeBody, type VerifierUpload } from './verifiers.ts'
 
 export type Role = 'agent' | 'runner' | 'admin'
 export type Tokens = Record<Role, string>
@@ -51,6 +52,27 @@ class HttpError extends Error {
 }
 
 const json = (value: unknown, status = 200): Reply => ({ status, json: value })
+
+function decode(part: string): string {
+  try {
+    return decodeURIComponent(part)
+  } catch {
+    throw new HttpError(400, 'badPath', 'The path has a broken percent-escape.')
+  }
+}
+
+/** A browser request from another site. Browsers attach the dashboard's Basic password on their own, so these are refused. */
+function crossSite(req: IncomingMessage): boolean {
+  const site = req.headers['sec-fetch-site']
+  if (site !== undefined && site !== 'same-origin' && site !== 'none') return true
+  const origin = req.headers.origin
+  if (origin === undefined) return false
+  try {
+    return new URL(origin).host !== req.headers.host
+  } catch {
+    return true
+  }
+}
 const STATUS = { invalid: 400, notFound: 404, conflict: 409 } as const
 const reply = <T>(r: Result<T>, shape: (v: T) => unknown = (v) => v): Reply =>
   r.ok ? json(shape(r.value)) : json({ error: r.rejection.code, message: r.rejection.message }, STATUS[r.rejection.kind])
@@ -79,7 +101,9 @@ function rolesOf(req: IncomingMessage, tokens: Tokens): Set<Role> {
 const LIMIT = 1024 * 1024
 const UPLOAD_LIMIT = 12 * 1024 * 1024
 
-async function readBody(req: IncomingMessage, limit: number): Promise<unknown> {
+/** JSON only, so a page on another site can't send one in a form post. Text only where a route takes it. */
+async function readBody(req: IncomingMessage, limit: number, text: boolean): Promise<unknown> {
+  const type = (req.headers['content-type'] ?? '').split(';')[0]!.trim().toLowerCase()
   const chunks: Buffer[] = []
   let size = 0
   for await (const chunk of req as AsyncIterable<Buffer>) {
@@ -87,11 +111,12 @@ async function readBody(req: IncomingMessage, limit: number): Promise<unknown> {
     if (size > limit) throw new HttpError(413, 'tooLarge', `The body can be at most ${limit / 1024 / 1024} MB.`)
     chunks.push(chunk)
   }
-  const text = Buffer.concat(chunks).toString('utf8')
-  if (!text.trim()) return {}
-  if ((req.headers['content-type'] ?? '').startsWith('text/plain')) return text
+  const raw = Buffer.concat(chunks).toString('utf8')
+  if (!raw.trim()) return {}
+  if (text && type === 'text/plain') return raw
+  if (type !== 'application/json') throw new HttpError(415, 'badContentType', `Send the body as application/json${text ? ' or text/plain' : ''}.`)
   try {
-    return JSON.parse(text)
+    return JSON.parse(raw)
   } catch {
     throw new HttpError(400, 'badJson', 'The body must be JSON.')
   }
@@ -115,7 +140,7 @@ function upload(body: unknown, steps: number): VerifierUpload {
 // Routes
 
 type Handler = (s: Service, c: Ctx) => Reply | Promise<Reply>
-type Route = [method: string, path: RegExp, roles: Role[], handler: Handler, limit?: number]
+type Route = [method: string, path: RegExp, roles: Role[], handler: Handler, limit?: number, text?: boolean]
 
 const P = (pattern: string) => new RegExp(`^${pattern.replace(/:\w+/g, '([^/]+)')}$`)
 const find = (s: Service, agent: string, module: string) => s.read((w) => locate(w, agent, module))
@@ -125,6 +150,27 @@ const stepsOf = (s: Service, agent: string, module: string) => {
   const found = find(s, agent, module)
   if (!found) throw new HttpError(404, 'noModule', `Agent ${agent} has no module ${module}.`)
   return found.m.steps.length
+}
+
+/** Stores a verifier set's files once the call that names them succeeds. */
+function stored<T>(s: Service, r: Result<T>, hash: string, files: Files): Result<T> {
+  if (r.ok) s.putFiles(hash, files)
+  return r
+}
+
+/** A change request's edits applied to the module's current verifiers, when they changed after it was filed. */
+function rebasedChange(s: Service, change: string): { spec: VerifierSpec; files: Files } | null {
+  const found = s.read((w) => cmd.changeRecord(w, change))
+  const current = found && verifiersOf(found.m)
+  if (!found || !current || found.c.state !== 'open' || found.c.base === current.hash) return null
+  const base = found.m.verifiers.find((v) => v.hash === found.c.base)!
+  const filesOf = (hash: string) => {
+    const files = s.files(hash)
+    if (!files) throw new Error(`The files of verifier set ${hash} are missing from the store`)
+    return files
+  }
+  const next = rebase({ ...base, files: filesOf(base.hash) }, { ...current, files: filesOf(current.hash) }, { ...found.c.proposed, files: filesOf(found.c.proposed.hash) })
+  return { spec: specOf(next), files: next.files }
 }
 
 const ROUTES: Route[] = [
@@ -149,6 +195,8 @@ const ROUTES: Route[] = [
         () => ({ blurb: blurb.trim() }),
       )
     },
+    LIMIT,
+    true,
   ],
   [
     'POST',
@@ -168,10 +216,9 @@ const ROUTES: Route[] = [
       const u = upload(b, stepsOf(s, agent!, module!))
       const spec = specOf(u)
       const author = b.author as string
-      s.putFiles(spec.hash, u.files)
       return reply(
         s.write('freezeVerifiers', { agent, module, author, hash: spec.hash, paths: spec.paths }, (w, at, config) =>
-          cmd.freezeVerifiers(w, at, { agent: agent!, module: module!, author, verifiers: spec }, config),
+          stored(s, cmd.freezeVerifiers(w, at, { agent: agent!, module: module!, author, verifiers: spec }, config), spec.hash, u.files),
         ),
       )
     },
@@ -194,10 +241,10 @@ const ROUTES: Route[] = [
       const problem = filesProblem(next.files) ?? verifierProblem({ ...specOf(next) }, found.m.steps.length)
       if (problem) throw new HttpError(400, 'badSpec', problem)
       const proposed = specOf(next)
-      s.putFiles(proposed.hash, next.files)
+      const author = b.author === undefined ? {} : { author: b.author }
       return reply(
         s.write('fileChange', { agent, module, reason: b.reason, hash: proposed.hash, changed }, (w, at, config) =>
-          cmd.fileChange(w, at, { agent: agent!, module: module!, reason: b.reason, proposed, changed }, config),
+          stored(s, cmd.fileChange(w, at, { agent: agent!, module: module!, reason: b.reason, proposed, changed, ...author }, config), proposed.hash, next.files),
         ),
       )
     },
@@ -283,8 +330,14 @@ const ROUTES: Route[] = [
     async (s, { params: [change], body }) => {
       const b = object(await body())
       if (typeof b.approve !== 'boolean') throw new HttpError(400, 'badSpec', 'Send {"approve": true} or {"approve": false}.')
-      const args = { change: change!, approve: b.approve }
-      return reply(s.write('decideChange', args, (w, at, config) => cmd.decideChange(w, at, args, config)))
+      const rebased = b.approve ? rebasedChange(s, change!) : null
+      const args = { change: change!, approve: b.approve, ...(rebased ? { rebased: rebased.spec } : {}) }
+      return reply(
+        s.write('decideChange', { change, approve: b.approve, rebased: rebased?.spec.hash ?? null }, (w, at, config) => {
+          const r = cmd.decideChange(w, at, args, config)
+          return rebased ? stored(s, r, rebased.spec.hash, rebased.files) : r
+        }),
+      )
     },
   ],
   [
@@ -294,8 +347,11 @@ const ROUTES: Route[] = [
     async (s, { params: [agent, module], body }) => {
       const u = upload(await body(), stepsOf(s, agent!, module!))
       const spec = specOf(u)
-      s.putFiles(spec.hash, u.files)
-      return reply(s.write('replaceVerifiers', { agent, module, hash: spec.hash, paths: spec.paths }, (w, at, config) => cmd.replaceVerifiers(w, at, { agent: agent!, module: module!, verifiers: spec }, config)))
+      return reply(
+        s.write('replaceVerifiers', { agent, module, hash: spec.hash, paths: spec.paths }, (w, at, config) =>
+          stored(s, cmd.replaceVerifiers(w, at, { agent: agent!, module: module!, verifiers: spec }, config), spec.hash, u.files),
+        ),
+      )
     },
     UPLOAD_LIMIT,
   ],
@@ -359,7 +415,7 @@ const TYPES: Record<string, string> = {
 
 async function serveFile(dir: string, path: string): Promise<Reply & { body?: Buffer }> {
   const root = resolve(dir)
-  let file = resolve(join(root, decodeURIComponent(path)))
+  let file = resolve(join(root, decode(path)))
   if (file !== root && !file.startsWith(root + sep)) return { status: 404, text: 'Not found\n' }
   const isFile = await stat(file).then((x) => x.isFile(), () => false)
   // Every other path is a dashboard route
@@ -373,7 +429,7 @@ async function serveFile(dir: string, path: string): Promise<Reply & { body?: Bu
 export function createHandler({ service, tokens, dashboard }: HttpOptions) {
   return async function handle(req: IncomingMessage, res: ServerResponse) {
     const send = (r: Reply & { body?: Buffer }) => {
-      const headers: Record<string, string> = { 'x-content-type-options': 'nosniff', ...r.headers }
+      const headers: Record<string, string> = { 'x-content-type-options': 'nosniff', 'x-frame-options': 'DENY', 'content-security-policy': "frame-ancestors 'none'", 'referrer-policy': 'same-origin', ...r.headers }
       let payload: string | Buffer | undefined = r.body
       if (r.json !== undefined) {
         headers['content-type'] = 'application/json; charset=utf-8'
@@ -399,15 +455,16 @@ export function createHandler({ service, tokens, dashboard }: HttpOptions) {
       const matches = ROUTES.filter(([, path]) => path.test(url.pathname))
       const route = matches.find(([m]) => m === method)
       if (!route) return send(matches.length ? json({ error: 'badMethod', message: `${method} isn't allowed here.` }, 405) : missing(`route ${url.pathname}`))
-      const [, path, allowed, handler, limit = LIMIT] = route
+      const [, path, allowed, handler, limit = LIMIT, text = false] = route
+      if (method !== 'GET' && crossSite(req)) return send(json({ error: 'crossSite', message: 'Calls that change something must come from the dashboard itself or from a client like curl.' }, 403))
       if (!allowed.some((r) => roles.has(r))) {
         const status = roles.size ? 403 : 401
         // The challenge lets a browser resend the admin password it gave for another page
         const headers = status === 401 ? { 'www-authenticate': CHALLENGE } : undefined
         return send({ ...json({ error: status === 401 ? 'noToken' : 'wrongToken', message: `This call takes the ${allowed.join(' or ')} token.` }, status), ...(headers ? { headers } : {}) })
       }
-      const params = path.exec(url.pathname)!.slice(1).map(decodeURIComponent)
-      send(await handler(service, { req, params, body: () => readBody(req, limit) }))
+      const params = path.exec(url.pathname)!.slice(1).map(decode)
+      send(await handler(service, { req, params, body: () => readBody(req, limit, text) }))
     } catch (e) {
       if (e instanceof HttpError) return send(json({ error: e.code, message: e.message }, e.status))
       console.error(e)

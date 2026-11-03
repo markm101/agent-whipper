@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -63,6 +63,8 @@ const VERIFIERS = {
   timeLimitMinutes: 5,
 }
 
+const pick = (git: ReturnType<typeof createGit>) => ({ checkout: git.checkout, changed: git.changed })
+
 async function scenario(name: string, executor: Executor, image: string) {
   const r = repo(name)
   const store = openStore(join(root, `${name}.db`))
@@ -77,7 +79,7 @@ async function scenario(name: string, executor: Executor, image: string) {
   const deps: JobDeps = {
     api: createApi(base, TOKENS.runner),
     executor,
-    checkout: createGit(join(root, `${name}-repos`)).checkout,
+    ...pick(createGit(join(root, `${name}-repos`))),
     runner: `${name}-runner`,
     work: join(root, `${name}-work`),
     defaultRepo: null,
@@ -123,7 +125,7 @@ async function scenario(name: string, executor: Executor, image: string) {
     assert.equal((await module()).steps[0]!.done, true)
 
     // A commit the runner can't fetch is a failed turn
-    await call('POST', '/agents/1/modules/m1/attempts', { attemptId: 'a2', commit: 'deadbeefdeadbeef', note: 'Forgot to push.' })
+    await call('POST', '/agents/1/modules/m1/attempts', { attemptId: 'a2', commit: 'deadbeef'.repeat(5), note: 'Forgot to push.' })
     await next()
     assert.equal((await call('GET', '/agents/1/modules/m1/attempts/a2')).verdict, 'fail')
 
@@ -152,3 +154,85 @@ const hasBusybox = spawnSync('docker', ['image', 'inspect', 'busybox:1.37'], { s
 test('the same in bare Docker containers', { skip: !hasBusybox && 'needs Docker and the busybox:1.37 image', timeout: 120_000 }, () =>
   scenario('docker', dockerExecutor(), 'busybox:1.37'),
 )
+
+/** A server and runner for one module whose verifiers are `files`, with `next()` running the next job. */
+async function rig(name: string, executor: Executor, image: string, files: Record<string, string>, benchmark: string, regression: string) {
+  const store = openStore(join(root, `${name}.db`))
+  const server = createServer(createHandler({ service: createService(store), tokens: TOKENS, dashboard: null }))
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  const call = async (method: string, path: string, body?: unknown, token = TOKENS.agent) => {
+    const res = await fetch(base + path, { method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) })
+    return (await res.json()) as Record<string, any>
+  }
+  const deps: JobDeps = { api: createApi(base, TOKENS.runner), executor, ...pick(createGit(join(root, `${name}-repos`))), runner: `${name}-runner`, work: join(root, `${name}-work`), defaultRepo: null, renewEveryMs: 1000, log: () => {} }
+  const next = async () => {
+    const job = await deps.api.claim(deps.runner, ['cpu'])
+    assert.ok(job, 'a job to run')
+    await runJob(job, deps)
+  }
+  const stop = async () => {
+    await new Promise<void>((done) => {
+      server.close(() => done())
+      server.closeAllConnections()
+    })
+    store.close()
+  }
+  const start = async (repo: string, startCommit: string) => {
+    await call('POST', '/agents/1/projects', { title: name, startCommit, repo, modules: [{ title: 'm', steps: ['s'], goal: { metric: 'time', unit: 'ms', direction: 'lower', targetGain: 10 } }] })
+    await call('POST', '/agents/1/modules/m1/verifiers', { author: 'verifier', image, files, commands: { regression, steps: [regression], benchmark }, hardware: 'cpu', timeLimitMinutes: 5 })
+  }
+  const module = async () => ((await call('GET', '/api/board', undefined, TOKENS.admin)) as Board).agents[0]!.project!.modules[0]!
+  return { call, next, stop, start, module }
+}
+
+test('symlinks in a commit can’t carry the frozen files out of the checkout', async () => {
+  const outside = join(root, 'outside')
+  mkdirSync(outside)
+  const dir = join(root, 'links')
+  mkdirSync(dir)
+  const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim()
+  git('init', '--quiet', '--initial-branch=main')
+  git('config', 'user.email', 'agent@example.com')
+  git('config', 'user.name', 'agent')
+  writeFileSync(join(dir, 'value.txt'), '100')
+  git('add', '-A')
+  git('commit', '--quiet', '-m', 'start')
+  const start = git('rev-parse', 'HEAD')
+  // The attack: a directory link out of the checkout, and a verifier path linked to a device that never ends
+  execFileSync('ln', ['-s', outside, join(dir, 'conf')])
+  execFileSync('ln', ['-s', '/dev/zero', join(dir, 'bench.sh')])
+  writeFileSync(join(dir, 'value.txt'), '80')
+  git('add', '-A')
+  git('commit', '--quiet', '-m', 'links')
+  const attack = git('rev-parse', 'HEAD')
+
+  const files = { 'bench.sh': `echo "{\\"value\\": $(cat value.txt), \\"work\\": 1}"`, 'conf/settings': 'frozen' }
+  const r = await rig('links', localExecutor, 'unused', files, 'sh bench.sh', 'true')
+  try {
+    await r.start(`file://${dir}`, start)
+    await r.next()
+    await r.call('POST', '/agents/1/modules/m1/attempts', { attemptId: 'a1', commit: attack, note: 'Link things.' })
+    await r.next()
+    const m = await r.module()
+    assert.deepEqual([m.attempts[0]!.verdict, m.attempts[0]!.median], ['win', 80], 'the frozen benchmark ran, not the link')
+    assert.equal(existsSync(join(outside, 'settings')), false, 'nothing was written through the link')
+    assert.deepEqual(m.flags.map((f) => f.kind), ['touchedVerifier'])
+  } finally {
+    await r.stop()
+  }
+})
+
+test('a process a command leaves running doesn’t outlive it', { skip: !hasBusybox && 'needs Docker and the busybox:1.37 image', timeout: 120_000 }, async () => {
+  const r = repo('leftovers')
+  // The regression test leaves a sleep running; the benchmark reports 100 plus the sleeps it can see
+  const files = { 'bench.sh': `n=$(ps | grep -c "[s]leep 300"); echo "{\\"value\\": $((100 + n)), \\"work\\": 1}"` }
+  const rr = await rig('leftovers', dockerExecutor({ runner: 'leftovers-runner' }), 'busybox:1.37', files, 'sh bench.sh', 'sleep 300 >/dev/null 2>&1 &')
+  try {
+    await rr.start(r.url, r.start)
+    await rr.next()
+    assert.equal((await rr.module()).goal.baseline, 100)
+  } finally {
+    await rr.stop()
+  }
+})

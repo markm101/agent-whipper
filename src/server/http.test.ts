@@ -50,8 +50,8 @@ async function boot(db: string) {
   return { call, stop }
 }
 
-const START = 'aaaaaaaaaaaa'
-const NEXT = 'bbbbbbbbbbbb'
+const START = 'a'.repeat(40)
+const NEXT = 'b'.repeat(40)
 const VERIFIERS = {
   author: 'verifier',
   image: 'node:26-slim',
@@ -110,7 +110,7 @@ test('agents, runners and the admin drive a module through HTTP, and the data su
   tick(5)
   const posted = await s.call('POST', '/agents/1/modules/m1/attempts', { body: { attemptId: 'a1', commit: NEXT, note: 'Cache parsed query trees.' } })
   assert.deepEqual([posted.json.job, posted.json.verdict, posted.json.module.state], ['queued', null, 'active'])
-  const busy = await s.call('POST', '/agents/1/modules/m1/attempts', { body: { attemptId: 'a2', commit: 'cccccccccccc', note: 'Too soon.' } })
+  const busy = await s.call('POST', '/agents/1/modules/m1/attempts', { body: { attemptId: 'a2', commit: 'c'.repeat(40), note: 'Too soon.' } })
   assert.deepEqual([busy.status, busy.json.error], [409, 'jobInFlight'])
   const job = (await s.call('POST', '/jobs/claim', { token: 'runner', body: { runner: 'r1', labels: ['cpu'] } })).json
   assert.deepEqual(job.commits, [START, NEXT])
@@ -174,5 +174,41 @@ test('change requests merge over the frozen files and wait for the admin', async
   assert.deepEqual(claim.files, { 'bench/latency.js': 'warm(); bench()' })
   const files = await s.call('GET', `/admin/verifiers/${hash}`, { token: 'admin' })
   assert.deepEqual(files.json, VERIFIERS.files)
+  await s.stop()
+})
+
+test('approving one change request never undoes another', async () => {
+  const s = await boot(join(dir, 'rebase.db'))
+  await s.call('POST', '/agents/3/projects', {
+    body: { title: 'suite', startCommit: START, modules: [{ title: 'workers', steps: ['Split'], goal: { metric: 'suite time', unit: 's', direction: 'lower', targetGain: 10 } }] },
+  })
+  await s.call('POST', '/agents/3/modules/m1/verifiers', { body: VERIFIERS })
+  // Both filed against the same set: one edits the benchmark, the other the regression test
+  const c1 = (await s.call('POST', '/agents/3/modules/m1/verifiers/changes', { body: { reason: 'Warm the cache first.', files: { 'bench/latency.js': 'warm()' } } })).json.change
+  const c2 = (await s.call('POST', '/agents/3/modules/m1/verifiers/changes', { body: { reason: 'Test the edge case.', author: 'verifier', files: { 'test/regression.test.js': 'edge()' } } })).json.change
+  await s.call('POST', `/admin/changes/${c1}`, { token: 'admin', body: { approve: true } })
+  await s.call('POST', `/admin/changes/${c2}`, { token: 'admin', body: { approve: true } })
+  const m = ((await s.call('GET', '/api/board', { token: 'admin' })).json as Board).agents[0]!.project!.modules[0]!
+  const frozen = m.verifiers.kind === 'frozen' ? m.verifiers : null
+  assert.equal(frozen?.author, 'verifier', 'approved edits keep the verifiers’ author')
+  assert.equal(m.changes[1]!.author, 'verifier')
+  const now = (await s.call('GET', `/admin/verifiers/${frozen!.hash}`, { token: 'admin' })).json
+  assert.deepEqual(now, { 'bench/latency.js': 'warm()', 'test/regression.test.js': 'edge()' })
+  await s.stop()
+})
+
+test('requests from other sites, form posts, and broken paths are refused', async () => {
+  const s = await boot(join(dir, 'guards.db'))
+  const basic = `Basic ${Buffer.from(`me:${TOKENS.admin}`).toString('base64')}`
+  const form = await s.call('POST', '/admin/changes/c1', { token: null, body: '{"approve":true}', headers: { authorization: basic, 'content-type': 'application/x-www-form-urlencoded' } })
+  assert.deepEqual([form.status, form.json.error], [415, 'badContentType'])
+  const crossSite = await s.call('POST', '/admin/changes/c1', { token: null, body: { approve: true }, headers: { authorization: basic, 'sec-fetch-site': 'cross-site' } })
+  assert.deepEqual([crossSite.status, crossSite.json.error], [403, 'crossSite'])
+  const otherOrigin = await s.call('POST', '/admin/changes/c1', { token: null, body: { approve: true }, headers: { authorization: basic, origin: 'https://evil.example' } })
+  assert.equal(otherOrigin.status, 403)
+  const broken = await s.call('GET', '/agents/%E0%A4%A')
+  assert.deepEqual([broken.status, broken.json.error], [400, 'badPath'])
+  const page = await s.call('GET', '/', { token: null, headers: { authorization: basic, accept: 'text/html' } })
+  assert.equal(page.headers.get('x-frame-options'), 'DENY')
   await s.stop()
 })

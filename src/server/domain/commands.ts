@@ -40,7 +40,7 @@ import {
   type World,
 } from './records.ts'
 import { conflict, invalid, notFound, ok, type Failure, type Result } from './result.ts'
-import { CAUSE, FAILED_TURNS, goalOf, isAgentId, isCommit, isText, live, moduleProblem, nextState, projectProblem, takes, verifierProblem, type ModuleEvent } from './rules.ts'
+import { CAUSE, FAILED_TURNS, HOLD_GRACE_MINUTES, MAX_RUNNER_ERRORS, goalOf, isAgentId, isCommit, isText, live, moduleProblem, nextState, projectProblem, takes, verifierProblem, type ModuleEvent } from './rules.ts'
 
 // Moving modules and raising flags
 
@@ -151,10 +151,24 @@ function cancel(j: JobRec, at: Ms) {
   j.finishedAt = at
 }
 
-/** A lapsed lease puts the job back in the queue for any runner. */
-function lapse(j: JobRec, now: Ms) {
+/** A runner couldn't run the job: it goes back in the queue, and after a few tries it fails without a verdict. */
+function runnerError(m: ModuleRec, j: JobRec, error: string, at: Ms) {
+  const claim = j.claims.at(-1)!
+  claim.endedAt = at
+  claim.error = error.slice(0, 500)
+  if (j.claims.filter((c) => c.error !== null).length < MAX_RUNNER_ERRORS) return void (j.state = 'queued')
+  j.state = 'failed'
+  j.finishedAt = at
+  if (j.kind === 'baseline') flag(m, 'baselineFailed', null, `No runner could run the baseline job: ${claim.error} ${m.id} waits for new verifiers or an abandon.`, at)
+}
+
+/** A lapsed lease puts the job back in the queue for any runner, and a runner that holds a job far past its time limit loses it. */
+function expire(m: ModuleRec, j: JobRec, now: Ms) {
   const claim = j.claims.at(-1)
-  if (j.state !== 'running' || !claim || claim.leaseUntil > now) return
+  if (j.state !== 'running' || !claim) return
+  const held = claim.at + (verifierSet(m, j.verifierHash)!.timeLimitMinutes + HOLD_GRACE_MINUTES) * MINUTE
+  if (held <= now && held < claim.leaseUntil) return runnerError(m, j, `${claim.runner} held the job past its time limit.`, held)
+  if (claim.leaseUntil > now) return
   claim.lapsed = true
   claim.endedAt = claim.leaseUntil
   j.state = 'queued'
@@ -182,7 +196,7 @@ export function settle(w: World, now: Ms, config: Config = DEFAULTS) {
     const p = a.project
     if (!p) continue
     for (const m of p.modules) {
-      for (const j of m.jobs) lapse(j, now)
+      for (const j of m.jobs) expire(m, j, now)
       if (!live(m.state)) continue
       const f = factsOf(p, m, now)
       if (f.deadline === null || now < f.deadline) continue
@@ -210,7 +224,14 @@ function workFlags(m: ModuleRec, j: JobRec, attempt: AttemptId | null, at: Ms) {
 function landBaseline(m: ModuleRec, j: JobRec, at: Ms) {
   if (measured(j)) return move(m, 'baselineMeasured', at)
   const r = j.results!
-  const why = j.state === 'killed' ? 'ran past its time limit' : r.tests && r.tests.passed < r.tests.total ? `failed ${r.tests.total - r.tests.passed} tests` : 'measured nothing'
+  const why =
+    r.outcome === 'killed'
+      ? 'ran past its time limit'
+      : r.outcome === 'badCommit'
+        ? `couldn't fetch the start commit: ${r.error ?? ''}`.trim()
+        : r.tests && r.tests.passed < r.tests.total
+          ? `failed ${r.tests.total - r.tests.passed} tests`
+          : 'measured nothing'
   flag(m, 'baselineFailed', null, `The baseline job ${why}. ${m.id} waits for new verifiers or an abandon.`, at)
 }
 
@@ -263,7 +284,7 @@ function find(w: World, agent: string, module: string): Result<Located> {
   return agentOf(w, agent) ? notFound('noModule', `Agent ${agent} has no module ${module}.`) : notFound('noAgent', `There is no agent ${agent}.`)
 }
 
-export type Created = { state: 'open'; modules: ModuleId[] } | { state: 'queued'; position: number }
+export type Created = { state: 'open' | 'ended'; modules: ModuleId[] } | { state: 'queued'; position: number }
 
 export function createProject(w: World, at: Ms, args: { agent: string; spec: ProjectSpec }, config: Config = DEFAULTS): Result<Created> {
   settle(w, at, config)
@@ -283,7 +304,8 @@ export function createProject(w: World, at: Ms, args: { agent: string; spec: Pro
     if (keyOf(a.queued[queuedAt]!) !== keyOf(spec)) return conflict('titleTaken', `Project "${spec.title}" is queued with a different plan.`)
     return ok({ state: 'queued', position: queuedAt + 1 })
   }
-  if (a && [a.project, ...a.past].some((x) => x?.title === spec.title)) return conflict('titleTaken', `Agent ${a.id} already had a project titled "${spec.title}".`)
+  const done = a && [a.project, ...a.past].find((x) => x?.title === spec.title)
+  if (done) return done.specKey === keyOf(spec) ? ok({ state: 'ended', modules: done.modules.map((m) => m.id) }) : conflict('titleTaken', `Agent ${a!.id} already had a project titled "${spec.title}".`)
 
   const agent = ensureAgent(w, args.agent)
   if (openOne) {
@@ -341,7 +363,7 @@ export function freezeVerifiers(w: World, at: Ms, args: { agent: string; module:
 export function fileChange(
   w: World,
   at: Ms,
-  args: { agent: string; module: string; reason: string; proposed: VerifierSpec; changed?: string[] },
+  args: { agent: string; module: string; reason: string; proposed: VerifierSpec; changed?: string[]; author?: string },
   config: Config = DEFAULTS,
 ): Result<{ change: ChangeId }> {
   settle(w, at, config)
@@ -355,12 +377,15 @@ export function fileChange(
   const problem = verifierProblem(args.proposed, m.steps.length)
   if (problem) return invalid('badSpec', problem)
   if (args.proposed.hash === current.hash) return invalid('badSpec', 'The proposed verifiers are the frozen ones.')
-  const same = m.changes.find((c) => c.state === 'open' && c.proposed.hash === args.proposed.hash)
+  if (args.author !== undefined && !isText(args.author, 40)) return invalid('badSpec', 'author must be the ID of the agent that wrote the change.')
+  const reason = args.reason.trim()
+  // The same request again, open or already rejected, is a repeat
+  const same = m.changes.find((c) => c.state !== 'approved' && c.proposed.hash === args.proposed.hash && c.reason === reason)
   if (same) return ok({ change: same.id })
   w.changes++
   const id = `c${w.changes}` as ChangeId
   const changed = Array.isArray(args.changed) ? args.changed.filter((x) => typeof x === 'string').slice(0, 200) : [...args.proposed.paths]
-  m.changes.push({ id, author: a.id, reason: args.reason.trim(), proposed: normalVerifiers(args.proposed), changed, state: 'open', filedAt: at, decidedAt: null })
+  m.changes.push({ id, author: args.author ?? a.id, reason, base: current.hash, proposed: normalVerifiers(args.proposed), changed, state: 'open', filedAt: at, decidedAt: null })
   return ok({ change: id })
 }
 
@@ -375,7 +400,7 @@ export function postAttempt(
   if (!found.ok) return found
   const { a, p, m } = found.value
   if (typeof args.attempt !== 'string' || !/^[A-Za-z0-9_.-]{1,60}$/.test(args.attempt)) return invalid('badSpec', 'An attemptId is 1 to 60 letters, digits, dots, dashes, or underscores.')
-  if (!isCommit(args.commit)) return invalid('badSpec', 'commit must be a commit hash.')
+  if (!isCommit(args.commit)) return invalid('badSpec', 'commit must be a full commit hash, such as the output of git rev-parse HEAD.')
   if (!isText(args.note, 500)) return invalid('badSpec', 'An attempt needs a one-line note.')
   const commit = args.commit.toLowerCase() as Commit
   const posted = m.attempts.find((x) => x.id === args.attempt)
@@ -471,7 +496,17 @@ function findChange(w: World, id: string) {
   return null
 }
 
-export function decideChange(w: World, at: Ms, args: { change: string; approve: boolean }, config: Config = DEFAULTS): Result<{ state: 'approved' | 'rejected' }> {
+/** The change request with its module, for the HTTP layer to rebase it before approval. */
+export function changeRecord(w: World, id: string) {
+  return findChange(w, id)
+}
+
+/**
+ * Approves or rejects a change request. When the verifiers changed after it
+ * was filed, approval takes `rebased`: the request's edits applied to the
+ * current set, so an approval never undoes another one.
+ */
+export function decideChange(w: World, at: Ms, args: { change: string; approve: boolean; rebased?: VerifierSpec }, config: Config = DEFAULTS): Result<{ state: 'approved' | 'rejected' }> {
   settle(w, at, config)
   const found = findChange(w, args.change)
   if (!found) return notFound('noChange', `There is no change request ${args.change}.`)
@@ -479,7 +514,15 @@ export function decideChange(w: World, at: Ms, args: { change: string; approve: 
   const state = args.approve ? 'approved' : 'rejected'
   if (c.state !== 'open') return c.state === state ? ok({ state }) : conflict('changeDecided', `${c.id} was already ${c.state}.`)
   if (args.approve && !takes('verifiers', m.state)) return conflict('wrongState', `${m.id} has ended, so its verifiers can't change. Reject the request instead.`)
-  if (args.approve) m.verifiers.push({ ...c.proposed, author: c.author, frozenAt: at })
+  const current = verifiersOf(m)!
+  const next = c.base === current.hash ? c.proposed : args.rebased
+  if (args.approve && !next) return conflict('changeStale', `${m.id}'s verifiers changed after ${c.id} was filed. Apply its edits to the current set and approve that.`)
+  if (args.approve && next) {
+    const problem = verifierProblem(next, m.steps.length)
+    if (problem) return invalid('badSpec', problem)
+    // The reviewed edits join the set its author wrote, so the author stays
+    if (next.hash !== current.hash) m.verifiers.push({ ...normalVerifiers(next), author: current.author, frozenAt: at })
+  }
   c.state = state
   c.decidedAt = at
   advance(w, a, at, config)
@@ -540,7 +583,7 @@ export function claimJob(w: World, at: Ms, args: { runner: string; labels: strin
   const repo = locate(w, a.id, m.id)!.p.repo
   const leaseUntil = at + config.leaseMinutes * MINUTE
   j.state = 'running'
-  j.claims.push({ runner: args.runner, at, leaseUntil, endedAt: null, lapsed: false })
+  j.claims.push({ runner: args.runner, at, leaseUntil, endedAt: null, lapsed: false, error: null })
   const v = verifierSet(m, j.verifierHash)!
   return ok({
     job: j.id,
@@ -568,25 +611,31 @@ export function renewLease(w: World, at: Ms, args: { job: string; runner: string
   if (!found) return notFound('noJob', `There is no job ${args.job}.`)
   const { j } = found
   const claim = j.claims.at(-1)
-  if (!claim || claim.runner !== args.runner || claim.lapsed) return conflict('notYourJob', `${args.runner} doesn't hold ${j.id}. Its lease lapsed, or another runner holds it.`)
+  if (!claim || claim.runner !== args.runner || claim.lapsed || claim.error !== null) return conflict('notYourJob', `${args.runner} doesn't hold ${j.id}. Its lease lapsed, or another runner holds it.`)
   if (j.state !== 'running') return ok({ state: j.state, leaseUntil: null })
   claim.leaseUntil = at + config.leaseMinutes * MINUTE
   return ok({ state: j.state, leaseUntil: iso(claim.leaseUntil) })
 }
 
-function resultsProblem(r: JobResults | undefined, j: JobRec): string | null {
+function resultsProblem(r: JobResults | undefined, j: JobRec, config: Config): string | null {
   if (!r || typeof r !== 'object') return 'Results must be an object.'
-  if (!['done', 'killed', 'error'].includes(r.outcome)) return 'outcome must be done, killed, or error.'
-  const t = r.tests
-  if (t !== null && (typeof t !== 'object' || !Number.isInteger(t.passed) || !Number.isInteger(t.total) || t.passed < 0 || t.passed > t.total))
-    return 'tests must be null or whole numbers with passed no more than total.'
-  if (!Array.isArray(r.runs) || r.runs.length > 200) return 'runs must be a list of at most 200 runs.'
+  if (!['done', 'killed', 'badCommit', 'error'].includes(r.outcome)) return 'outcome must be done, killed, badCommit, or error.'
+  const t = r.tests ?? null
+  const count = (x: unknown) => Number.isSafeInteger(x) && (x as number) >= 0
+  if (t !== null && (typeof t !== 'object' || !count(t.passed) || !count(t.total) || t.passed > t.total)) return 'tests must be null or whole numbers with passed no more than total.'
+  if (!Array.isArray(r.runs)) return 'runs must be a list.'
   const commits = new Set([j.commit, j.bestCommit].filter(Boolean))
   for (const run of r.runs) {
     if (!run || typeof run.commit !== 'string' || !commits.has(run.commit.toLowerCase() as Commit)) return `Every run's commit must be one of the job's commits: ${[...commits].join(', ')}.`
-    if (!Number.isFinite(run.value) || !Number.isFinite(run.work) || run.work < 0) return "Every run needs a finite value and a work count that isn't negative."
+    if (!Number.isFinite(run.value) || run.value <= 0) return 'Every run needs a positive value, because gains are percentages of it.'
+    if (!Number.isFinite(run.work) || run.work < 0) return "Every run needs a work count that isn't negative."
   }
-  if (!Array.isArray(r.touched) || !r.touched.every((x) => typeof x === 'string')) return 'touched must be a list of file paths.'
+  // Exactly the runs asked for on each commit, or none for a commit the benchmark couldn't measure
+  for (const c of commits) {
+    const n = r.runs.filter((run) => run.commit.toLowerCase() === c).length
+    if (n !== 0 && n !== config.runs) return `Send ${config.runs} runs on ${c}, or none if its benchmark failed; got ${n}.`
+  }
+  if (!Array.isArray(r.touched) || r.touched.length > 1000 || !r.touched.every((x) => typeof x === 'string')) return 'touched must be a list of file paths.'
   return null
 }
 
@@ -599,17 +648,23 @@ export function sendResults(w: World, at: Ms, args: { job: string; runner: strin
   if (j.state === 'done' || j.state === 'killed' || j.state === 'failed' || j.state === 'cancelled') return ok({ state: j.state })
   const claim = j.claims.at(-1)
   if (j.state !== 'running' || !claim || claim.runner !== args.runner || claim.endedAt !== null) return conflict('notYourJob', `${args.runner} doesn't hold ${j.id}. Its lease lapsed, or another runner holds it.`)
-  const problem = resultsProblem(args.results, j)
+  const problem = resultsProblem(args.results, j, config)
   if (problem) return invalid('badResults', problem)
 
   const r = args.results
+  if (r.outcome === 'error') {
+    runnerError(m, j, String(r.error ?? 'The runner gave no reason.'), at)
+    settle(w, at, config)
+    return ok({ state: j.state })
+  }
   j.results = {
     outcome: r.outcome,
     tests: r.tests && { passed: r.tests.passed, total: r.tests.total },
     runs: r.runs.map((run) => ({ commit: run.commit.toLowerCase() as Commit, value: run.value, work: run.work })),
-    touched: [...r.touched],
+    touched: r.touched.slice(0, 1000),
     ...(r.error ? { error: String(r.error).slice(0, 500) } : {}),
   }
+  // A commit the runner can't fetch fails like failing tests, but isn't stored as a result to reuse
   j.state = r.outcome === 'done' ? 'done' : r.outcome === 'killed' ? 'killed' : 'failed'
   j.finishedAt = at
   claim.endedAt = at

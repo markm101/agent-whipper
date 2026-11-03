@@ -89,7 +89,7 @@ export function finishStep(w: World, agent: string, module: string, held: boolea
 }
 
 export const post = (w: World, agent: string, module: string, attempt: string, note: string, at: Ms) =>
-  must(postAttempt(w, at, { agent, module, attempt, commit: hex(`${agent}:${module}:${attempt}`), note }, MOCK_CONFIG))
+  must(postAttempt(w, at, { agent, module, attempt, commit: hex(`${agent}:${module}:${attempt}`, 40), note }, MOCK_CONFIG))
 
 type Event = { at: Ms; run: (w: World, at: Ms) => void }
 type AttemptOptions = ResultOptions & { waited?: number; took?: number }
@@ -100,7 +100,7 @@ function story(events: Event[], agent: string, t0: Ms) {
   return {
     project(min: number, title: string, modules: Plan[], maxMinutes?: number) {
       on(min, (w, at) => {
-        const spec = { title, startCommit: hex(`${agent}:${title}:start`), modules: modules.map((m) => m.spec), ...(maxMinutes ? { maxMinutes } : {}) }
+        const spec = { title, startCommit: hex(`${agent}:${title}:start`, 40), modules: modules.map((m) => m.spec), ...(maxMinutes ? { maxMinutes } : {}) }
         const r = must(createProject(w, at, { agent, spec }, MOCK_CONFIG))
         if (r.state === 'open') r.modules.forEach((id, i) => plans.set(id, modules[i]!))
       })

@@ -70,7 +70,12 @@ export interface VerifierSpec {
 }
 
 export interface JobResults {
-  outcome: 'done' | 'killed' | 'error'
+  /**
+   * `done`: the job ran. `killed`: it ran past its time limit. `badCommit`: the
+   * commit under test can't be fetched. `error`: the runner couldn't run it, so
+   * it goes back in the queue.
+   */
+  outcome: 'done' | 'killed' | 'badCommit' | 'error'
   /** Null when no tests ran. */
   tests: { passed: number; total: number } | null
   runs: Run[]
@@ -107,6 +112,8 @@ export interface ChangeRec {
   id: ChangeId
   author: string
   reason: string
+  /** The set the change was filed against. */
+  base: string
   proposed: VerifierSpec
   /** Paths the change adds, removes, or edits. */
   changed: string[]
@@ -119,9 +126,11 @@ export interface Claim {
   runner: string
   at: Ms
   leaseUntil: Ms
-  /** When the claim ended: results arrived, the lease lapsed, or the job was cancelled. */
+  /** When the claim ended: results arrived, the lease lapsed, the runner gave up, or the job was cancelled. */
   endedAt: Ms | null
   lapsed: boolean
+  /** Why the runner couldn't run the job, when it couldn't. */
+  error: string | null
 }
 
 export interface JobRec {

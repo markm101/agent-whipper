@@ -17,6 +17,23 @@ export const gainOf = (best: number, next: number, direction: Direction) => ((di
 
 export const reaches = (value: number, target: number, direction: Direction) => (direction === 'lower' ? value <= target : value >= target)
 
+function choose(n: number, k: number): number {
+  let c = 1
+  for (let i = 1; i <= k; i++) c = (c * (n - k + i)) / i
+  return c
+}
+
+/** One-sided p for U at least `observed`, by the normal approximation with a continuity correction. */
+function normalP(observed: number, n: number, m: number): number {
+  const mean = (n * m) / 2
+  const sd = Math.sqrt((n * m * (n + m + 1)) / 12)
+  const z = (observed - 0.5 - mean) / sd
+  // Upper tail of the standard normal, by the Abramowitz and Stegun erfc approximation
+  const t = 1 / (1 + 0.3275911 * Math.abs(z / Math.SQRT2))
+  const erfc = t * Math.exp(-((z * z) / 2)) * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))))
+  return z >= 0 ? erfc / 2 : 1 - erfc / 2
+}
+
 function combinations(n: number, k: number): number[][] {
   const out: number[][] = []
   const pick = (start: number, chosen: number[]) => {
@@ -39,6 +56,8 @@ export function rankP(a: readonly number[], b: readonly number[], beats: (x: num
     return sum
   }
   const observed = u(a, b)
+  // Enumeration grows fast; past a few thousand splits the normal approximation is close enough
+  if (choose(a.length + b.length, a.length) > 20_000) return normalP(observed, a.length, b.length)
   const pooled = [...a, ...b]
   const splits = combinations(pooled.length, a.length)
   let hits = 0

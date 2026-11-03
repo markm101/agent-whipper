@@ -26,7 +26,7 @@ import { attemptDetailOf, attemptStatusOf, boardOf, boardText, changeOf } from '
 
 const T0 = Date.parse('2026-11-03T00:00:00Z')
 const at = (min: number): Ms => T0 + min * MINUTE
-const commit = (name: string) => [...name].map((c) => c.charCodeAt(0).toString(16)).join('').padEnd(12, '0').slice(0, 40) as Commit
+const commit = (name: string) => [...name].map((c) => c.charCodeAt(0).toString(16)).join('').padEnd(40, '0').slice(0, 40) as Commit
 const START = commit('start')
 
 const GOAL: GoalSpec = { metric: 'p95 latency', unit: 'ms', direction: 'lower', targetGain: 10 }
@@ -513,4 +513,62 @@ test('blurbs are one line, and the plain board lists every agent', () => {
 
 test('defaults match DESIGN.md', () => {
   assert.deepEqual(DEFAULTS, { defaultMaxMinutes: 90, maxMinutesCeiling: 120, leaseMinutes: 2, runs: 5 })
+})
+
+test('a job the runner couldn’t run goes back in the queue, and after three tries fails without a verdict', () => {
+  const w = started()
+  must(postAttempt(w, at(5), { agent: 'a', module: 'm1', attempt: 'a1', commit: commit('a1'), note: 'Try.' }))
+  const error = { outcome: 'error' as const, tests: null, runs: [], touched: [], error: 'The Docker daemon is down.' }
+  for (const [i, runner] of ['r1', 'r2', 'r3'].entries()) {
+    const t = must(claimJob(w, at(6 + i), { runner, labels: ['cpu'] }))!
+    assert.equal(t.commit, commit('a1'), 'the same job each time')
+    must(sendResults(w, at(6 + i), { job: t.job, runner, results: error }))
+  }
+  const m = viewOf(w, 'm1', at(9))
+  assert.deepEqual([m.attempts[0]!.job, m.attempts[0]!.verdict, m.steps[0]!.failedTurns, m.status.state], ['failed', null, 0, 'active'])
+  assert.equal(must(claimJob(w, at(9), { runner: 'r1', labels: ['cpu'] })), null)
+  // The module takes the next attempt; the runner's trouble wasn't the agent's turn
+  must(postAttempt(w, at(10), { agent: 'a', module: 'm1', attempt: 'a2', commit: commit('a2'), note: 'Again.' }))
+})
+
+test('a commit the runner can’t fetch is a failed turn, and posting it again once pushed measures it', () => {
+  const w = started()
+  must(postAttempt(w, at(5), { agent: 'a', module: 'm1', attempt: 'a1', commit: commit('a1'), note: 'Forgot to push.' }))
+  const t = must(claimJob(w, at(5), { runner: 'r1', labels: ['cpu'] }))!
+  must(sendResults(w, at(6), { job: t.job, runner: 'r1', results: { outcome: 'badCommit', tests: null, runs: [], touched: [], error: 'Not in the remote.' } }))
+  assert.equal(viewOf(w, 'm1', at(6)).steps[0]!.failedTurns, 1)
+  must(postAttempt(w, at(7), { agent: 'a', module: 'm1', attempt: 'a2', commit: commit('a1'), note: 'Pushed now.' }))
+  assert.equal(moduleOf(w, 'm1').jobs.at(-1)!.state, 'queued', 'a new job, not the stored failure')
+})
+
+test('a runner that holds a job far past its time limit loses it', () => {
+  const w = started()
+  must(postAttempt(w, at(5), { agent: 'a', module: 'm1', attempt: 'a1', commit: commit('a1'), note: 'Try.' }))
+  const t = must(claimJob(w, at(5), { runner: 'r1', labels: ['cpu'] }))!
+  // The job's limit is 20 minutes, plus 30 of grace; the runner keeps renewing
+  for (let min = 6; min <= 60; min++) renewLease(w, at(min), { job: t.job, runner: 'r1' })
+  const j = moduleOf(w, 'm1').jobs.at(-1)!
+  assert.equal(j.state, 'queued')
+  assert.equal(j.claims[0]!.endedAt, at(55))
+  assert.match(j.claims[0]!.error ?? '', /past its time limit/)
+})
+
+test('results must have the asked-for runs on each commit, with positive values', () => {
+  const w = started()
+  must(postAttempt(w, at(5), { agent: 'a', module: 'm1', attempt: 'a1', commit: commit('a1'), note: 'Try.' }))
+  const t = must(claimJob(w, at(5), { runner: 'r1', labels: ['cpu'] }))!
+  const send = (runs: { commit: Commit; value: number; work: number }[]) => (x: World) => sendResults(x, at(6), { job: t.job, runner: 'r1', results: { outcome: 'done', tests: { passed: 1, total: 1 }, runs, touched: [] } })
+  const twelve = [...around(START, 100), ...around(START, 100), ...around(START, 100).slice(0, 2)]
+  rejects(w, at(6), send([...twelve, ...around(commit('a1'), 90)]), 'badResults')
+  rejects(w, at(6), send([...around(START, 100), ...around(commit('a1'), 90).map((r) => ({ ...r, value: -r.value }))]), 'badResults')
+  // None on the commit under test is how a runner says its benchmark crashed
+  must(send(around(START, 100))(w))
+  assert.equal(viewOf(w, 'm1', at(6)).attempts[0]!.verdict, 'fail')
+})
+
+test('repeating a project after it ended returns the first answer', () => {
+  const w = started([mod('cache', ['only'])])
+  attempt(w, at(5), 'a1', 89)
+  const spec = { title: 'search', startCommit: START, modules: [mod('cache', ['only'])] }
+  assert.deepEqual(must(createProject(w, at(6), { agent: 'a', spec })), { state: 'ended', modules: ['m1'] })
 })

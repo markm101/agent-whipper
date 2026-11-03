@@ -3,13 +3,14 @@
 // run the tests, then the benchmark alternating between commits, and send
 // what happened. The lease is renewed throughout; if the server says the job
 // was cancelled or taken away, the job stops and sends nothing.
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { lstatSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { join, sep } from 'node:path'
 import type { Run } from '../shared/api.ts'
 import type { Ticket } from '../server/domain/commands.ts'
 import type { JobResults } from '../server/domain/records.ts'
 import { safePath } from '../server/verifiers.ts'
 import type { Box, Executor } from './exec.ts'
+import { MissingCommit } from './git.ts'
 import type { Exit } from './proc.ts'
 
 export type Claimed = Ticket & { files: Record<string, string> }
@@ -24,7 +25,9 @@ export interface Api {
 export interface JobDeps {
   api: Api
   executor: Executor
-  checkout(repo: string, commit: string, into: string): Promise<void>
+  checkout(repo: string, commit: string, into: string, timeoutMs: number): Promise<void>
+  /** Which of `paths` differ between two commits. */
+  changed(repo: string, from: string, to: string, paths: string[], timeoutMs: number): Promise<string[]>
   runner: string
   work: string
   defaultRepo: string | null
@@ -53,7 +56,8 @@ export function lastJson(out: string): Record<string, unknown> | null {
  */
 export function testCount(r: Exit): { passed: number; total: number } {
   const j = lastJson(r.stdout)
-  const counted = j && Number.isInteger(j.passed) && Number.isInteger(j.total) && (j.total as number) >= (j.passed as number) && (j.passed as number) >= 0
+  const sane = (x: unknown) => Number.isSafeInteger(x) && (x as number) >= 0 && (x as number) <= 1_000_000
+  const counted = j && sane(j.passed) && sane(j.total) && (j.total as number) >= (j.passed as number)
   let passed = counted ? (j.passed as number) : r.code === 0 ? 1 : 0
   let total = counted ? (j.total as number) : 1
   if (r.code !== 0) {
@@ -63,21 +67,50 @@ export function testCount(r: Exit): { passed: number; total: number } {
   return { passed, total }
 }
 
-/** One benchmark run: the {"value": n, "work": m} line it prints. */
+/** One benchmark run: the {"value": n, "work": m} line it prints. Values must be positive, since gains are percentages. */
 export function benchRun(r: Exit): { value: number; work: number } | null {
   if (r.code !== 0) return null
   const j = lastJson(r.stdout)
-  if (!j || typeof j.value !== 'number' || !Number.isFinite(j.value)) return null
+  if (!j || typeof j.value !== 'number' || !Number.isFinite(j.value) || j.value <= 0) return null
   const work = typeof j.work === 'number' && Number.isFinite(j.work) && j.work >= 0 ? j.work : 0
   return { value: j.value, work }
 }
 
 class Killed extends Error {}
 class Lost extends Error {}
+class BadCommit extends Error {}
+/** The server answered 4xx. */
+export class Refused extends Error {}
 
-export async function runJob(t: Claimed, d: JobDeps): Promise<void> {
+/**
+ * Writes a frozen file into a checkout without following any link the commit
+ * planted: every symlink or file in the way is removed first, so the write
+ * can't land outside the checkout.
+ */
+export function overlay(root: string, path: string, content: string) {
+  const parts = path.split('/')
+  let at = root
+  for (const [i, part] of parts.entries()) {
+    at = join(at, part)
+    const last = i === parts.length - 1
+    let st: ReturnType<typeof lstatSync> | null = null
+    try {
+      st = lstatSync(at)
+    } catch {}
+    if (st && (last || !st.isDirectory())) rmSync(at, { recursive: true, force: true })
+    if (!last && (!st || !st.isDirectory())) mkdirSync(at)
+  }
+  const real = realpathSync(join(at, '..'))
+  if (real !== realpathSync(root) && !real.startsWith(realpathSync(root) + sep)) throw new Error(`Refusing to write ${path} outside the checkout.`)
+  writeFileSync(at, content, { flag: 'wx' })
+}
+
+export async function runJob(t: Claimed, d: JobDeps, stop?: AbortSignal): Promise<void> {
   const dir = join(d.work, 'jobs', t.job)
   const lost = new AbortController()
+  // Stopping the runner abandons the job; its lease lapses and another runner takes it
+  const onStop = () => lost.abort()
+  stop?.addEventListener('abort', onStop, { once: true })
   const deadline = Date.now() + t.timeLimitMinutes * 60_000
   const boxes: Box[] = []
   const renew = setInterval(() => {
@@ -102,20 +135,23 @@ export async function runJob(t: Claimed, d: JobDeps): Promise<void> {
     if (!repo) throw new Error('The project names no repo, and the runner has no WHIP_REPO.')
     for (const path of Object.keys(t.files)) if (!safePath(path)) throw new Error(`Refusing the verifier path ${path}.`)
 
-    // Check out each commit, and note the verifier files the commit under test changed
+    // Check out each commit. A commit under test that can't be fetched is the agent's to fix
     const commits = [...new Set([...t.commits, t.commit])]
     const dirs = new Map(commits.map((c) => [c, join(dir, c)]))
-    for (const c of commits) await d.checkout(repo, c, dirs.get(c)!)
-    const touched = Object.keys(t.files).filter((p) => {
-      const file = join(dirs.get(t.commit)!, p)
-      return existsSync(file) && readFileSync(file, 'utf8') !== t.files[p]
-    })
-    for (const c of commits)
-      for (const [p, content] of Object.entries(t.files)) {
-        const file = join(dirs.get(c)!, p)
-        mkdirSync(dirname(file), { recursive: true })
-        writeFileSync(file, content)
+    const left = () => Math.max(1000, deadline - Date.now())
+    for (const c of commits) {
+      try {
+        await d.checkout(repo, c, dirs.get(c)!, left())
+      } catch (e) {
+        if (e instanceof MissingCommit && c === t.commit) throw new BadCommit(e.message)
+        throw e
       }
+      if (lost.signal.aborted) throw new Lost()
+    }
+    // Verifier files the attempt changed relative to the commit it's measured against
+    const best = t.commits.find((c) => c !== t.commit)
+    const touched = t.kind === 'attempt' && best ? await d.changed(repo, best, t.commit, Object.keys(t.files), left()) : []
+    for (const c of commits) for (const [p, content] of Object.entries(t.files)) overlay(dirs.get(c)!, p, content)
 
     const box = new Map<string, Box>()
     for (const c of commits) {
@@ -150,9 +186,10 @@ export async function runJob(t: Claimed, d: JobDeps): Promise<void> {
     results = { outcome: 'done', tests, runs, touched }
   } catch (e) {
     if (e instanceof Lost) {
-      d.log(`${t.job} was cancelled or taken away; stopping`)
+      d.log(`${t.job} was cancelled, taken away, or stopped`)
       results = null
     } else if (e instanceof Killed) results = { outcome: 'killed', tests: null, runs: [], touched: [] }
+    else if (e instanceof BadCommit) results = { outcome: 'badCommit', tests: null, runs: [], touched: [], error: e.message.slice(0, 500) }
     else {
       const message = (e as Error).message
       d.log(`${t.job} couldn't run: ${message}`)
@@ -160,11 +197,21 @@ export async function runJob(t: Claimed, d: JobDeps): Promise<void> {
     }
   } finally {
     clearInterval(renew)
+    stop?.removeEventListener('abort', onStop)
     await Promise.all(boxes.map((b) => b.close().catch(() => {})))
     rmSync(dir, { recursive: true, force: true })
   }
-  if (results) await d.api.results(t.job, d.runner, results)
+  if (!results) return
+  try {
+    await d.api.results(t.job, d.runner, results)
+  } catch (e) {
+    // The server refused these results, so say the runner couldn't run the job instead of leaving it to loop
+    if (!(e instanceof Refused) || results.outcome === 'error') throw e
+    d.log(`whip-server refused the results of ${t.job}: ${e.message}`)
+    await d.api.results(t.job, d.runner, { outcome: 'error', tests: null, runs: [], touched: [], error: `whip-server refused the results: ${e.message}`.slice(0, 500) })
+  }
 }
+
 
 export function createApi(base: string, token: string, fetchImpl: typeof fetch = fetch): Api {
   const post = async (path: string, body: unknown) => {
@@ -191,7 +238,8 @@ export function createApi(base: string, token: string, fetchImpl: typeof fetch =
         const r = await post(`/jobs/${job}/results`, { runner, ...results }).catch((e: Error) => ({ status: 0, json: { message: e.message } }))
         // 409: the job was taken away, so these results no longer count
         if (r.status === 200 || r.status === 409) return
-        if ((r.status >= 400 && r.status < 500) || attempt >= 5) throw new Error(`results answered ${r.status}: ${r.json?.message ?? ''}`)
+        if (r.status >= 400 && r.status < 500) throw new Refused(`${r.status} ${r.json?.message ?? ''}`.trim())
+        if (attempt >= 5) throw new Error(`results answered ${r.status}: ${r.json?.message ?? ''}`)
         await new Promise((done) => setTimeout(done, 2000 * attempt))
       }
     },

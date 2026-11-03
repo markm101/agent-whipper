@@ -9,6 +9,9 @@ export const verifiersOf = (m: ModuleRec): VerifierSet | null => m.verifiers.at(
 export const verifierSet = (m: ModuleRec, hash: string): VerifierSet | null => m.verifiers.findLast((v) => v.hash === hash) ?? null
 export const inFlight = (m: ModuleRec): JobRec | null => m.jobs.find((j) => j.state === 'queued' || j.state === 'running') ?? null
 export const lastWin = (m: ModuleRec): AttemptRec | null => m.attempts.findLast((a) => a.judged?.verdict === 'win') ?? null
+/** When an attempt's job ended, judged or not. Null while it's in flight. */
+export const attemptEnd = (m: ModuleRec, a: AttemptRec): Ms | null => a.judgedAt ?? m.jobs.find((j) => j.id === a.job)?.finishedAt ?? null
+
 export const failedTurns = (m: ModuleRec, step: number) => m.attempts.filter((a) => a.step === step && a.judged?.verdict === 'fail').length
 export const projectEnded = (p: ProjectRec) => p.modules.every((m) => ended(m.state))
 
@@ -76,7 +79,8 @@ export function waitsOf(m: ModuleRec, startedAt: Ms | null, now: Ms): WaitRec[] 
     let from: Ms | null = j.queuedAt
     for (const c of j.claims) {
       add(from, c.at)
-      from = c.lapsed ? c.endedAt : null
+      // A lapsed lease or a runner error puts the job back in the queue
+      from = c.lapsed || c.error !== null ? c.endedAt : null
       if (from === null) break
     }
     if (from !== null) add(from, j.state === 'queued' ? now : (j.finishedAt ?? now))
@@ -150,7 +154,14 @@ export function factsOf(p: ProjectRec, m: ModuleRec, now: Ms): Facts {
   const extended = extensions.reduce((sum, e) => sum + e.minutes, 0)
   const deadline = startedAt === null ? null : startedAt + (m.maxMinutes + extended + waited) * MINUTE
   const last =
-    deadline === null ? null : (m.attempts.find((a) => a.postedAt <= deadline && (a.judgedAt === null || a.judgedAt >= deadline)) ?? m.attempts.find((a) => a.postedAt > deadline) ?? null)
+    deadline === null
+      ? null
+      : (m.attempts.find((a) => {
+          const end = attemptEnd(m, a)
+          return a.postedAt <= deadline && (end === null || end >= deadline)
+        }) ??
+        m.attempts.find((a) => a.postedAt > deadline) ??
+        null)
   return {
     start,
     best: win?.commit ?? start,
@@ -179,7 +190,7 @@ export function factsOf(p: ProjectRec, m: ModuleRec, now: Ms): Facts {
 export function timesOutAt(m: ModuleRec, f: Facts): Ms | null {
   if (f.deadline === null) return null
   const d = f.deadline
-  if (f.last) return f.last.judgedAt
+  if (f.last) return attemptEnd(m, f.last)
   const check = m.jobs.find((j) => j.kind === 'stepCheck' && j.queuedAt <= d && (j.finishedAt === null || j.finishedAt >= d) && j.state !== 'cancelled')
   const graceEnds = d + f.graceMinutes * MINUTE
   if (!check) return graceEnds
