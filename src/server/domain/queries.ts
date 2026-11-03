@@ -1,9 +1,9 @@
 // Everything the server derives instead of storing. `factsOf` computes a
 // module's numbers at one moment, so commands and views read the same values.
-import type { Commit } from '../../shared/api.ts'
-import { extensionSeries, improve, median } from './judge.ts'
+import type { Commit, ProjectEnd, ProjectResult } from '../../shared/api.ts'
+import { extensionSeries, improve, judge, median } from './judge.ts'
 import { MINUTE, type AgentRec, type AttemptRec, type Ms, type JobRec, type ModuleRec, type ProjectRec, type VerifierSet, type World } from './records.ts'
-import { GRACE_SHARE, ended, live } from './rules.ts'
+import { GRACE_SHARE, NO_WIN_LIMIT, ended, live } from './rules.ts'
 
 export const verifiersOf = (m: ModuleRec): VerifierSet | null => m.verifiers.at(-1) ?? null
 export const verifierSet = (m: ModuleRec, hash: string): VerifierSet | null => m.verifiers.findLast((v) => v.hash === hash) ?? null
@@ -13,7 +13,8 @@ export const lastWin = (m: ModuleRec): AttemptRec | null => m.attempts.findLast(
 export const attemptEnd = (m: ModuleRec, a: AttemptRec): Ms | null => a.judgedAt ?? m.jobs.find((j) => j.id === a.job)?.finishedAt ?? null
 
 export const failedTurns = (m: ModuleRec, step: number) => m.attempts.filter((a) => a.step === step && a.judged?.verdict === 'fail').length
-export const projectEnded = (p: ProjectRec) => p.modules.every((m) => ended(m.state))
+/** Every module has passed or been abandoned. With a goal, the project can still be open. */
+export const modulesEnded = (p: ProjectRec) => p.modules.every((m) => ended(m.state))
 
 /** A job that passed its tests and measured something. */
 export const measured = (j: JobRec) => j.state === 'done' && !!j.results?.tests && j.results.tests.passed === j.results.tests.total && j.results.runs.length > 0
@@ -61,6 +62,88 @@ export function endCommit(p: ProjectRec): Commit | null {
   if (!m || !ended(m.state)) return null
   return lastWin(m)?.commit ?? starts.at(-1) ?? null
 }
+
+/** The commit the project has reached: the start of its first module that hasn't ended, or where it ended. */
+export function reachedCommit(p: ProjectRec): Commit | null {
+  const i = p.modules.findIndex((m) => !ended(m.state))
+  return i === -1 ? endCommit(p) : startCommits(p)[i]!
+}
+
+/** The module whose verifiers measure the project: the last one before the reached commit that measured a baseline. */
+export function measureHost(p: ProjectRec): ModuleRec | null {
+  const i = p.modules.findIndex((m) => !ended(m.state))
+  return (i === -1 ? p.modules : p.modules.slice(0, i)).findLast((m) => baselineJob(m) !== null) ?? null
+}
+
+/** The job measuring the start commit against the reached commit, if one was queued. */
+export function progressJob(p: ProjectRec): { host: ModuleRec; j: JobRec } | null {
+  const reached = reachedCommit(p)
+  for (const host of [...p.modules].reverse()) {
+    const j = host.jobs.findLast((x) => x.kind === 'final' && x.commit === reached && x.bestCommit === p.startCommit && x.state !== 'cancelled')
+    if (j) return { host, j }
+  }
+  return null
+}
+
+/** What the start commit and the reached commit measured, side by side in one job. */
+export function progressOf(p: ProjectRec): ProjectResult | null {
+  const found = progressJob(p)
+  if (!found) return null
+  const { host, j } = found
+  if (j.state === 'queued' || j.state === 'running') return { state: 'measuring' }
+  const values = (c: Commit | null) => (j.results?.runs ?? []).filter((r) => r.commit === c).map((r) => r.value)
+  const r = judge({ tests: j.results?.tests ?? null, killed: j.state !== 'done', best: values(j.bestCommit), next: values(j.commit) }, { direction: host.goal.direction, minGain: 0 })
+  if (r.median === null || r.bestMedian === null || r.gain === null || r.p === null) return { state: 'failed' }
+  return { state: 'done', metric: host.goal.metric, unit: host.goal.unit, direction: host.goal.direction, from: r.bestMedian, to: r.median, gain: r.gain, p: r.p }
+}
+
+/** Whether the latest measurement reached the project's goal. */
+export function goalMet(p: ProjectRec): boolean {
+  const g = p.goal
+  const r = progressOf(p)
+  if (!g || r?.state !== 'done') return false
+  if (g.targetGain !== null) return r.gain >= g.targetGain
+  return g.direction === 'lower' ? r.to <= g.target! : r.to >= g.target!
+}
+
+/** When the project's hours are up, or null without a budget. */
+export const budgetEndsAt = (p: ProjectRec): Ms | null => (p.goal?.hours ? p.openedAt + p.goal.hours * 60 * MINUTE : null)
+
+/** Modules in a row, counting back from the last to end, that started and ended without a win. */
+export function noWinRun(p: ProjectRec): number {
+  let n = 0
+  for (const m of p.modules.filter((x) => ended(x.state)).reverse()) {
+    // A module that never started tried nothing
+    if (baselineJob(m) === null) continue
+    if (lastWin(m)) break
+    n++
+  }
+  return n
+}
+
+/**
+ * Where a project stands. Without a goal it ends when its modules do. With
+ * one it ends when a measurement shows the goal met, when its hours are up,
+ * or when too many modules in a row ended without a win. Until then a
+ * project whose modules have all ended is measuring, or short of its goal
+ * and waiting for the agent to add a module.
+ */
+export type ProjectStanding = { state: 'open' } | { state: 'measuring' } | { state: 'short' } | { state: 'ended'; end: ProjectEnd }
+
+export function standingOf(p: ProjectRec, now: Ms): ProjectStanding {
+  if (!modulesEnded(p)) return { state: 'open' }
+  if (!p.goal) return { state: 'ended', end: 'modules' }
+  if (goalMet(p)) return { state: 'ended', end: 'goalMet' }
+  const budget = budgetEndsAt(p)
+  if (budget !== null && now >= budget) return { state: 'ended', end: 'budget' }
+  if (noWinRun(p) >= NO_WIN_LIMIT) return { state: 'ended', end: 'noWins' }
+  const reached = reachedCommit(p)
+  // A reached commit past the start gets measured; until that lands the project waits
+  const r = reached && reached !== p.startCommit ? progressOf(p) : { state: 'failed' as const }
+  return r === null || r.state === 'measuring' ? { state: 'measuring' } : { state: 'short' }
+}
+
+export const projectEnded = (p: ProjectRec, now: Ms) => standingOf(p, now).state === 'ended'
 
 /** The pending module whose turn it is: the first that hasn't ended, if it's pending. */
 export function firstInLine(p: ProjectRec): ModuleRec | null {

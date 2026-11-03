@@ -153,7 +153,7 @@ printf '  %s\n' "$(sh "$dir/hook.sh")"
 echo
 echo "Start the agent in $top with a prompt like this one, with your goal in it:"
 echo
-echo "  You're agent $id on Agent Whipper. Read .whip/guide.md and follow it. Your goal: <what to improve, and the number that shows it>. Plan the climb as a project starting from commit $start, with repo file:///repos/$name.git."
+echo "  You're agent $id on Agent Whipper. Read .whip/guide.md and follow it. Your goal: <the metric and the value to reach, such as p95 latency under 250 ms>, within <N> hours. Plan the climb as a project with that as its goal, starting from commit $start, with repo file:///repos/$name.git."
 echo
 echo "Then start a second session, the verifier, in a folder of its own, to write each module's tests and benchmark:"
 echo

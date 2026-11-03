@@ -42,7 +42,7 @@ function agentWith(m: Module): Agent {
     id: '1' as AgentId,
     blurb: 'Caching parsed queries.',
     line: '',
-    project: { title: 'search-perf', modules: [filler('m0', 1), m, filler('m2', 3), filler('m3', 4), filler('m4', 5)], current: m.id },
+    project: { title: 'search-perf', goal: null, end: null, progress: null, reached: null, noWinRun: 0, state: 'open', modules: [filler('m0', 1), m, filler('m2', 3), filler('m3', 4), filler('m4', 5)], current: m.id },
     queued: [],
   }
 }
@@ -69,15 +69,21 @@ test('an ended project sums up what it did and where to start the next one', () 
   const a = agentWith(moduleWith({}))
   a.project = {
     title: 'search-perf',
+    goal: null,
+    state: 'ended',
+    end: 'modules',
+    progress: null,
+    reached: null,
+    noWinRun: 0,
     current: null,
     modules: [passed('m1', 1, 415, 371, 'a'.repeat(40)), { ...moduleWith({ id: 'm2' as ModuleId, position: 2 }), status: { state: 'abandoned', reason: 'x', followUp: null } }, passed('m3', 3, 371, 331, '9be1c04'.padEnd(40, '0'))],
   }
   // 415 -> 371 and 371 -> 331, chained, plus the abandoned module's 352 against its 371 baseline
   assert.equal(boardLine(a, now), 'agent 1: Project: search-perf ended: 2 passed, 1 abandoned. p95 latency about 24% lower overall. To keep climbing, create a new project from 9be1c04.')
   // Once the final job has measured start against end in one job, that's the number
-  a.project.final = { state: 'measuring' }
+  a.project.progress = { state: 'measuring' }
   assert.match(boardLine(a, now), /abandoned\. Measuring its start against its end in one job now\./)
-  a.project.final = { state: 'done', metric: 'p95 latency', unit: 'ms', direction: 'lower', from: 415, to: 318, gain: 23.4, p: 0.004 }
+  a.project.progress = { state: 'done', metric: 'p95 latency', unit: 'ms', direction: 'lower', from: 415, to: 318, gain: 23.4, p: 0.004 }
   assert.match(boardLine(a, now), /abandoned\. p95 latency 415 -> 318 ms, 23% lower over the project\. To keep/)
 })
 

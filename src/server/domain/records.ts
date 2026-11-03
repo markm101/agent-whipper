@@ -13,7 +13,11 @@ export const iso = (ms: Ms) => new Date(ms).toISOString() as Iso
 
 export type ModuleState = 'pending' | 'active' | 'pastTarget' | 'stuck' | 'passed' | 'abandoned'
 export type StuckCause = 'step' | 'target' | 'time'
-/** `final` measures a finished project's start commit against its final commit, in one job. */
+/**
+ * `final` measures the project's start commit against the commit it has
+ * reached, in one job: once the project ends, and after each module that
+ * moves it when the project has a goal.
+ */
 export type JobKind = 'baseline' | 'attempt' | 'stepCheck' | 'final'
 
 export interface Config {
@@ -50,12 +54,25 @@ export interface ModuleSpec {
   retryOf?: string
 }
 
+/** A goal for the whole climb. Every module's goal measures the same metric, and the project stays open until it's met. */
+export interface ProjectGoalSpec {
+  metric: string
+  unit: string
+  direction: Direction
+  /** One of these: the value to reach, or the percent better than the start commit. */
+  target?: number
+  targetGain?: number
+  /** Hours from when the project opens. Once they're up, no module starts. */
+  hours?: number
+}
+
 export interface ProjectSpec {
   title: string
   startCommit: string
   /** The git remote the runner fetches commits from. Without one, the runner uses its default. */
   repo?: string
   maxMinutes?: number
+  goal?: ProjectGoalSpec
   modules: ModuleSpec[]
 }
 
@@ -208,12 +225,23 @@ export interface ModuleRec {
   flags: FlagRec[]
 }
 
+export interface ProjectGoal {
+  metric: string
+  unit: string
+  direction: Direction
+  target: number | null
+  targetGain: number | null
+  hours: number | null
+}
+
 export interface ProjectRec {
   title: string
   specKey: string
   startCommit: Commit
   repo: string | null
   maxMinutes: number | null
+  /** Frozen when the project opens. Absent on projects stored before goals existed. */
+  goal?: ProjectGoal | null
   modules: ModuleRec[]
   openedAt: Ms
 }

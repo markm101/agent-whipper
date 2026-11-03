@@ -70,6 +70,13 @@ export function finish(w: World, job: JobId, outcome: Outcome, opts: ResultOptio
   const best = factsOf(p, m, at).bestValue
   const on = (commit: Commit, center: number, order: number[], perRun = work): Run[] => order.map((k) => ({ commit, value: center + k * spread, work: perRun }))
   let runs: Run[]
+  if (j.kind === 'final') {
+    // The start commit reads as the first module's baseline, and the reached commit as the module's best
+    const from = factsOf(p, p.modules[0]!, at).baseline!
+    const a = on(j.bestCommit!, from, BEST_ORDER)
+    const b = on(j.commit, best!, NEW_ORDER)
+    return send({ outcome: 'done', tests: { passed: 0, total: 0 }, runs: a.flatMap((x, i) => [x, b[i]!]), touched })
+  }
   if (j.kind === 'baseline') runs = on(j.commit, 'median' in outcome ? outcome.median : 0, BEST_ORDER)
   else if (j.bestCommit === j.commit) runs = on(j.commit, best!, BEST_ORDER)
   else {

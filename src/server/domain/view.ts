@@ -1,10 +1,10 @@
 // What the server sends: the records turned into the Board and AttemptDetail
 // of src/shared/api.ts, the plain-text board lines, and the small answers to
 // an agent's GET calls. Read-only; settle the world first.
-import type { Agent, AgentId, Attempt, AttemptDetail, AttemptId, Board, ChangeId, Clock, Commit, Goal, Iso, JobId, Module, ModuleId, ModuleStatus, ProjectResult, Verdict } from '../../shared/api.ts'
+import type { Agent, AgentId, Attempt, AttemptDetail, AttemptId, Board, ChangeId, Clock, Commit, Goal, Iso, JobId, Module, ModuleId, ModuleStatus, Project, Verdict } from '../../shared/api.ts'
 import { judge } from './judge.ts'
 import { boardLine } from '../../shared/boardLine.ts'
-import { currentOf, factsOf, failedTurns, firstInLine, locate, measured, verifiersOf, type Facts } from './queries.ts'
+import { budgetEndsAt, currentOf, factsOf, failedTurns, firstInLine, goalMet, locate, measured, noWinRun, progressOf, reachedCommit, standingOf, verifiersOf, type Facts } from './queries.ts'
 import { MINUTE, iso, type AgentRec, type AttemptRec, type JobRec, type ModuleRec, type Ms, type ProjectRec, type VerifierSet, type World } from './records.ts'
 
 const jobOf = (m: ModuleRec, x: AttemptRec) => m.jobs.find((j) => j.id === x.job)!
@@ -94,22 +94,25 @@ function moduleOf(p: ProjectRec, m: ModuleRec, now: Ms): Module {
   }
 }
 
-/** The project's final measurement, once it has ended. */
-function finalOf(p: ProjectRec): ProjectResult | undefined {
-  const host = p.modules.find((m) => m.jobs.some((j) => j.kind === 'final'))
-  const j = host?.jobs.findLast((x) => x.kind === 'final')
-  if (!host || !j || j.state === 'cancelled') return undefined
-  if (j.state === 'queued' || j.state === 'running') return { state: 'measuring' }
-  const values = (c: Commit | null) => (j.results?.runs ?? []).filter((r) => r.commit === c).map((r) => r.value)
-  const r = judge({ tests: j.results?.tests ?? null, killed: j.state !== 'done', best: values(j.bestCommit), next: values(j.commit) }, { direction: host.goal.direction, minGain: 0 })
-  if (r.median === null || r.bestMedian === null || r.gain === null || r.p === null) return { state: 'failed' }
-  return { state: 'done', metric: host.goal.metric, unit: host.goal.unit, direction: host.goal.direction, from: r.bestMedian, to: r.median, gain: r.gain, p: r.p }
+function projectOf(p: ProjectRec, now: Ms): Project {
+  const standing = standingOf(p, now)
+  const g = p.goal ?? null
+  const budget = budgetEndsAt(p)
+  return {
+    title: p.title,
+    goal: g && { ...g, budgetEndsAt: budget === null ? null : iso(budget) },
+    state: standing.state,
+    end: standing.state === 'ended' ? standing.end : null,
+    progress: progressOf(p),
+    reached: reachedCommit(p),
+    noWinRun: noWinRun(p),
+    modules: p.modules.map((m) => moduleOf(p, m, now)),
+    current: currentOf(p)?.id ?? null,
+  }
 }
 
 export function agentView(a: AgentRec, now: Ms): Agent {
-  const p = a.project
-  const final = p && finalOf(p)
-  const project = p && { title: p.title, modules: p.modules.map((m) => moduleOf(p, m, now)), current: currentOf(p)?.id ?? null, ...(final ? { final } : {}) }
+  const project = a.project && projectOf(a.project, now)
   const agent: Agent = { id: a.id, blurb: a.blurb, line: '', project, queued: a.queued.map((q) => q.title) }
   return { ...agent, line: boardLine(agent, new Date(now)) }
 }
@@ -121,7 +124,10 @@ export function boardOf(w: World, now: Ms): Board {
 /** GET /agents/{id}/project: the agent's project in brief, so an agent can find its modules and a verifier agent the ones waiting for verifiers. */
 export interface AgentProject {
   title: string
-  /** Null once the project has ended. */
+  goal: Project['goal']
+  state: Project['state']
+  progress: Project['progress']
+  /** Null once every module has ended. */
   current: ModuleId | null
   /** `failed`: frozen, but the baseline job failed on them, so the module waits for a change request. */
   modules: { id: ModuleId; position: number; title: string; status: ModuleStatus; steps: string[]; goal: Goal; verifiers: 'missing' | 'frozen' | 'failed'; openChanges: number }[]
@@ -132,6 +138,7 @@ export interface AgentProject {
 export function agentProjectOf(a: AgentRec, now: Ms): AgentProject | null {
   const { project: p, queued } = agentView(a, now)
   if (!p) return null
+  const { goal, state, progress } = p
   const modules = p.modules.map((m) => ({
     id: m.id,
     position: m.position,
@@ -142,7 +149,7 @@ export function agentProjectOf(a: AgentRec, now: Ms): AgentProject | null {
     verifiers: m.verifiers.kind === 'frozen' && m.status.state === 'pending' && m.status.waitingFor === 'verifiers' ? ('failed' as const) : m.verifiers.kind,
     openChanges: m.verifiers.kind === 'frozen' ? m.verifiers.openChanges : 0,
   }))
-  return { title: p.title, current: p.current, modules, queued }
+  return { title: p.title, goal, state, progress, current: p.current, modules, queued }
 }
 
 /** GET /board: every agent's board line. */
@@ -192,8 +199,8 @@ export interface AttemptStatus {
   line: string
 }
 
-/** Whether the project ends with this module: every other one has ended. */
-const isLast = (p: ProjectRec, m: ModuleRec) => p.modules.every((x) => x === m || x.state === 'passed' || x.state === 'abandoned')
+/** Whether the project ends with this module: every other one has ended, and no goal holds the project open. */
+const isLast = (p: ProjectRec, m: ModuleRec) => p.modules.every((x) => x === m || x.state === 'passed' || x.state === 'abandoned') && (!p.goal || goalMet(p))
 
 const pct = (n: number) => `${Math.abs(n) < 10 ? Math.abs(n).toFixed(1) : Math.round(Math.abs(n))}%`
 const pText = (p: number) => (p < 0.001 ? 'p < 0.001' : `p = ${p.toFixed(3)}`)

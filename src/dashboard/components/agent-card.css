@@ -1,9 +1,9 @@
-/* Card A. Each card spans eight board rows as a subgrid, one per line, so a
+/* Card A. Each card spans nine board rows as a subgrid, one per line, so a
    line sits at the same height across a row of cards even when a blurb wraps
    or one card has a callout. */
 .agent-card {
   position: relative;
-  grid-row: span 8;
+  grid-row: span 9;
   display: grid;
   grid-template-rows: subgrid;
   row-gap: 0;
@@ -188,6 +188,47 @@
   font-weight: 500;
   white-space: nowrap;
   color: var(--success-text);
+}
+
+.agent-card__goal {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-faint);
+}
+
+/* Cards without a goal keep the row, empty, so lines stay level across the board */
+.agent-card__goal:not(:empty) {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-faint);
+}
+
+.agent-card__goal-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.agent-card__goal[data-tone='success'] .agent-card__goal-text {
+  color: var(--success-text);
+}
+
+.agent-card__goal[data-tone='warning'] .agent-card__goal-text {
+  color: var(--warning-text);
+}
+
+.agent-card__goal-now {
+  white-space: nowrap;
+}
+
+.agent-card__goal-bar.meter {
+  flex: none;
+  width: 56px;
+  height: 4px;
+  margin-left: auto;
 }
 
 .agent-card__blurb {

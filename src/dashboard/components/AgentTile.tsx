@@ -77,6 +77,15 @@ export function AgentTile({ agent, now }: { agent: Agent; now: number }) {
         <span>{c.under.text}</span>
         {c.under.chip && <span className="agent-card__chip">{c.under.chip}</span>}
       </p>
+      <p className="agent-card__goal" data-tone={c.goal?.tone}>
+        {c.goal && (
+          <>
+            <span className="agent-card__goal-text">{c.goal.text}</span>
+            {c.goal.now && <span className="agent-card__goal-now">{c.goal.now}</span>}
+            <Meter value={c.goal.share} tone={c.goal.tone} className="agent-card__goal-bar" />
+          </>
+        )}
+      </p>
       <p className="agent-card__blurb" data-empty={!c.blurb || undefined}>
         {c.blurb ?? 'No blurb yet.'}
       </p>

@@ -88,8 +88,21 @@ test('agents, runners and the admin drive a module through HTTP, and the data su
 
   // The project in brief, where a verifier agent finds the modules that need verifiers
   const brief = await s.call('GET', '/agents/1/project')
-  assert.deepEqual([brief.json.title, brief.json.current, brief.json.queued], ['search-perf', 'm1', []])
+  assert.deepEqual([brief.json.title, brief.json.current, brief.json.queued, brief.json.goal, brief.json.state, brief.json.progress], ['search-perf', 'm1', [], null, 'open', null])
   assert.deepEqual(brief.json.modules.map((m: { id: string; verifiers: string; steps: string[]; status: unknown }) => [m.id, m.verifiers, m.steps, m.status]), [['m1', 'missing', ['Cache parsed queries'], { state: 'pending', waitingFor: 'verifiers' }]])
+  // A goal for the whole climb comes back with the brief, frozen as sent
+  const goal = { metric: 'p95 latency', unit: 'ms', direction: 'lower', target: 250, hours: 8 }
+  const aimed = await s.call('POST', '/agents/7/projects', {
+    body: { title: 'aimed', startCommit: START, goal, modules: [{ title: 'cache', steps: ['Cache'], goal: { metric: 'p95 latency', unit: 'ms', direction: 'lower', targetGain: 10 } }] },
+  })
+  assert.equal(aimed.status, 200)
+  const aimedBrief = (await s.call('GET', '/agents/7/project')).json
+  assert.deepEqual([aimedBrief.goal.target, aimedBrief.goal.targetGain, aimedBrief.goal.hours, aimedBrief.state], [250, null, 8, 'open'])
+  assert.match(aimedBrief.goal.budgetEndsAt, /^2026-11-03T08:00/)
+  const offMetric = await s.call('POST', '/agents/8/projects', {
+    body: { title: 'off', startCommit: START, goal, modules: [{ title: 'heap', steps: ['Shrink'], goal: { metric: 'heap', unit: 'MB', direction: 'lower', targetGain: 10 } }] },
+  })
+  assert.deepEqual([offMetric.status, offMetric.json.error], [400, 'badSpec'])
   const none = await s.call('GET', '/agents/9/project')
   assert.deepEqual([none.status, none.json.message], [404, 'There is no project for agent 9. Create one with POST /agents/9/projects.'])
 

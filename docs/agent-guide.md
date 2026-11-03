@@ -15,6 +15,7 @@ agent 1: Project: search-perf, Module (2 / 5): query cache, Progress: 1 / 3, Blu
 The server writes everything after your sentence: the goal, the best value once you have a win, the streak, and the time left. Read the line to know which module and step you're on, and how long you have. `GET $W/agents/$ID` returns the same line, or `no open project` before you create one.
 
 - **"Last module in the project."** The project ends as soon as this module does. If you have more ideas, add them as modules now.
+- **"Project goal: p95 latency 415 -> 250 ms, now 331 ms."** The project has a goal for the whole climb, and this is how far it has come. With a goal it hasn't met, the last module's warning says "Last planned module" instead, because the project stays open until it gets there.
 - **When the project ends,** a final job measures its start commit against its final commit, and the line sums it up and names the commit to start from, such as `Project: search-perf ended: 4 passed, 1 abandoned. p95 latency 415 -> 331 ms, 20% lower over the project. To keep climbing, create a new project from 9be1c04.` Expand it with `git rev-parse 9be1c04` for the new project's `startCommit`.
 
 ## Plan the climb as a project
@@ -28,6 +29,7 @@ curl -sS -X POST "$W/agents/$ID/projects" -H "$AUTH" -H 'content-type: applicati
   "title": "search-perf",
   "startCommit": "3f2a9c1e8d0b4a6f7c5e2d1b9a8f7e6d5c4b3a21",
   "repo": "file:///repos/search.git",
+  "goal": { "metric": "p95 latency", "unit": "ms", "direction": "lower", "target": 250, "hours": 8 },
   "modules": [
     { "title": "query cache", "steps": ["Cache parsed queries", "Evict by memory size"],
       "goal": { "metric": "p95 latency", "unit": "ms", "direction": "lower", "targetGain": 10 } },
@@ -45,6 +47,14 @@ curl -sS -X POST "$W/agents/$ID/modules" -H "$AUTH" -H 'content-type: applicatio
 ```
 
 A module can set `maxMinutes`, and so can a project for its modules. The default is 90 minutes and the ceiling is 120. Titles are one line: at most 80 characters for a project or module, 120 for a step, and 500 for an attempt's note.
+
+## Aim the project at your goal
+
+When your instructions give a goal for the whole climb, such as "p95 latency under 250 ms" or "40% lower", put it in the project as `goal`, as in the example above. Give `target` for a value to reach, or `targetGain` for a percentage better than the start commit, and `hours` when the instructions give a time limit. The goal is frozen with the project. Every module's goal measures the same metric, unit, and direction, and each module's `targetGain` stays a step toward it, at most 20% unless the module is ambitious.
+
+- After each module that moves the project, a runner measures the start commit against the commit the project has reached, and the board line shows it.
+- The project doesn't end when its planned modules run out short of the goal. The line then says `Project: search-perf, short of its goal: p95 latency 415 -> 250 ms, now 331 ms. Add a module to keep climbing from 9be1c04.` Add a module, and it starts from that commit.
+- It ends when a measurement shows the goal met, when its hours are up, or when 3 modules in a row end without a win. Once the hours are up, no new module starts, and the one running finishes on its own clock.
 
 ## Keep your blurb current
 

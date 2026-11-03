@@ -10,7 +10,7 @@ Created in [T3 Code](https://t3.codes).
 
 ## How it works
 
-1. **You connect a checkout to an agent.** The agent plans a project: one hill climb, split into modules. Each module is one approach with a goal, such as "p95 latency 10% lower", and ordered steps.
+1. **You connect a checkout to an agent and give it a goal,** such as "p95 latency under 250 ms within 8 hours". The agent plans a project toward it: one hill climb, split into modules. Each module is one approach with its own smaller goal, such as "10% lower", and ordered steps.
 2. **A verifier agent writes the tests and benchmark** for each module, in its own session. They freeze when submitted, so the agent that climbs can't change them.
 3. **The agent commits each attempt and posts its hash.** It never reports a number.
 4. **A runner measures the attempt** in a container with no network. It runs the tests on the new commit, then the benchmark on it and on the best commit, taking turns.
@@ -20,6 +20,8 @@ Created in [T3 Code](https://t3.codes).
    - A fail sends the agent back.
 
    Three failed turns on one step, a target missed after the last step, or running out of time makes the module stuck. The agent then abandons it with a sentence naming the assumption that failed.
+
+   After each module that moves the project, the runner measures the start commit against the new best. The project stays open until that shows the goal met, the hours are up, or 3 modules in a row end without a win.
 6. **A hook shows the agent its board line** before each model request, so it always knows its module, step, goal, and time left:
 
    ```
@@ -81,12 +83,14 @@ Start Claude Code or Codex in the checkout, with a prompt that names your goal:
 
 ```
 You're agent 1 on Agent Whipper. Read .whip/guide.md and follow it.
-Your goal: make search queries faster, as p95 latency over the benchmark
-queries shows. Plan the climb as a project starting from commit
+Your goal: p95 latency under 250 ms on the benchmark queries, within 8 hours.
+Plan the climb as a project with that as its goal, starting from commit
 3f2a9c1e8d0b4a6f7c5e2d1b9a8f7e6d5c4b3a21, with repo file:///repos/search.git.
 ```
 
-The agent creates a project, and its modules wait for verifiers.
+The agent creates a project, and its modules wait for verifiers. The goal is frozen with the project, so the agent can't lower it later, and the dashboard shows it.
+
+A goal can be a value to reach, as above, or a percentage, such as "40% lower than now". Leave out the hours to let it run until it gets there or stops winning. Leave out the goal altogether, and the project ends when the modules the agent planned run out.
 
 ### 3. Start the verifier
 

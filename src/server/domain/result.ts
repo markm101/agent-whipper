@@ -18,6 +18,7 @@ export type RejectionCode =
   | 'noChange'
   // conflict: the request doesn't fit the current state
   | 'noOpenProject'
+  | 'budgetSpent'
   | 'titleTaken'
   | 'wrongState'
   | 'jobInFlight'

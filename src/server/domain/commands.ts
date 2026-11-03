@@ -6,6 +6,7 @@ import type { AgentId, AttemptId, ChangeId, Commit, FlagKind, Iso, JobId, JobSta
 import { holds, judge, reaches } from './judge.ts'
 import {
   agentOf,
+  budgetEndsAt,
   endCommit,
   baselineJob,
   inFlight,
@@ -17,8 +18,12 @@ import {
   firstInLine,
   lastWin,
   locate,
+  measureHost,
   measured,
+  modulesEnded,
+  progressJob,
   projectEnded,
+  reachedCommit,
   startCommits,
   timesOutAt,
   verifierSet,
@@ -38,13 +43,32 @@ import {
   type ModuleRec,
   type ModuleSpec,
   type Ms,
+  type ProjectGoalSpec,
   type ProjectRec,
   type ProjectSpec,
   type VerifierSpec,
   type World,
 } from './records.ts'
 import { conflict, invalid, notFound, ok, type Failure, type Result } from './result.ts'
-import { CAUSE, FAILED_TURNS, HOLD_GRACE_MINUTES, MAX_RUNNER_ERRORS, goalOf, isAgentId, isCommit, isText, live, moduleProblem, nextState, projectProblem, takes, verifierProblem, type ModuleEvent } from './rules.ts'
+import {
+  CAUSE,
+  FAILED_TURNS,
+  HOLD_GRACE_MINUTES,
+  MAX_RUNNER_ERRORS,
+  goalMismatch,
+  goalOf,
+  isAgentId,
+  isCommit,
+  isText,
+  live,
+  moduleProblem,
+  nextState,
+  projectGoalOf,
+  projectProblem,
+  takes,
+  verifierProblem,
+  type ModuleEvent,
+} from './rules.ts'
 
 // Moving modules and raising flags
 
@@ -70,11 +94,21 @@ const normalModule = (s: ModuleSpec): ModuleSpec => ({
   ...(s.retryOf === undefined ? {} : { retryOf: s.retryOf }),
 })
 
+const normalGoal = (g: ProjectGoalSpec): ProjectGoalSpec => ({
+  metric: g.metric.trim(),
+  unit: g.unit.trim(),
+  direction: g.direction,
+  ...(g.target === undefined ? {} : { target: g.target }),
+  ...(g.targetGain === undefined ? {} : { targetGain: g.targetGain }),
+  ...(g.hours === undefined ? {} : { hours: g.hours }),
+})
+
 const normalProject = (s: ProjectSpec): ProjectSpec => ({
   title: s.title.trim(),
   startCommit: s.startCommit.toLowerCase(),
   ...(s.repo === undefined ? {} : { repo: s.repo }),
   ...(s.maxMinutes === undefined ? {} : { maxMinutes: s.maxMinutes }),
+  ...(s.goal === undefined ? {} : { goal: normalGoal(s.goal) }),
   modules: s.modules.map(normalModule),
 })
 
@@ -117,7 +151,8 @@ function moduleFrom(a: AgentRec, spec: ModuleSpec, projectMax: number | null, co
 function open(a: AgentRec, spec: ProjectSpec, at: Ms, config: Config) {
   if (a.project) a.past.push(a.project)
   const maxMinutes = spec.maxMinutes ?? null
-  const p: ProjectRec = { title: spec.title, specKey: keyOf(spec), startCommit: spec.startCommit as Commit, repo: spec.repo ?? null, maxMinutes, modules: [], openedAt: at }
+  const goal = spec.goal ? projectGoalOf(spec.goal) : null
+  const p: ProjectRec = { title: spec.title, specKey: keyOf(spec), startCommit: spec.startCommit as Commit, repo: spec.repo ?? null, maxMinutes, goal, modules: [], openedAt: at }
   p.modules = spec.modules.map((s) => moduleFrom(a, s, maxMinutes, config))
   a.project = p
 }
@@ -179,10 +214,17 @@ function expire(m: ModuleRec, j: JobRec, now: Ms) {
   j.state = 'queued'
 }
 
-/** Opens the next queued project once the open one ends, and queues the baseline of the module whose turn it is. */
+/**
+ * Stops a project whose hours are up, measures how far it has come, opens
+ * the next queued project once the open one ends, and queues the baseline of
+ * the module whose turn it is.
+ */
 function advance(w: World, a: AgentRec, at: Ms, config: Config) {
-  if (a.project && projectEnded(a.project)) measureProject(w, a, a.project, at)
-  if (a.project && projectEnded(a.project) && a.queued.length) open(a, a.queued.shift()!, at, config)
+  if (a.project) {
+    stopForBudget(a.project, at)
+    measureProject(w, a, a.project, at)
+  }
+  if (a.project && projectEnded(a.project, at) && a.queued.length) open(a, a.queued.shift()!, at, config)
   const p = a.project
   if (!p) return
   for (const m of p.modules) remeasure(w, a, p, m, at)
@@ -199,17 +241,35 @@ function advance(w: World, a: AgentRec, at: Ms, config: Config) {
 }
 
 /**
- * An ended project measures its start commit against the commit it left
- * behind, in one job on its last module's verifiers, so its result isn't
- * pieced together from modules measured in different jobs.
+ * Measures the project's start commit against the commit it has reached, in
+ * one job on the verifiers of the last module that got there, so the result
+ * isn't pieced together from modules measured in different jobs. A project
+ * with a goal does this each time a module moves it, to know whether it's
+ * there yet. One without a goal does it once, when it ends.
  */
 function measureProject(w: World, a: AgentRec, p: ProjectRec, at: Ms) {
-  const host = p.modules.findLast((m) => baselineJob(m) !== null)
-  const end = endCommit(p)
+  if (!p.goal && !modulesEnded(p)) return
+  const reached = reachedCommit(p)
+  // A measurement still waiting for a commit the project has moved past would measure nothing anyone reads
+  for (const m of p.modules) for (const j of m.jobs) if (j.kind === 'final' && j.state === 'queued' && j.commit !== reached) cancel(j, at)
+  const host = measureHost(p)
   const v = host && verifiersOf(host)
-  if (!host || !v || !end || end === p.startCommit) return
-  if (host.jobs.some((j) => j.kind === 'final' && j.state !== 'cancelled')) return
-  queue(w, a, host, 'final', { step: null, commit: end, bestCommit: p.startCommit, stepTests: [] }, at)
+  if (!host || !v || !reached || reached === p.startCommit || progressJob(p)) return
+  queue(w, a, host, 'final', { step: null, commit: reached, bestCommit: p.startCommit, stepTests: [] }, at)
+}
+
+/** Once a project's hours are up, no module starts: as soon as none is live or stuck, the pending ones are abandoned. */
+function stopForBudget(p: ProjectRec, at: Ms) {
+  const ends = budgetEndsAt(p)
+  if (ends === null || at < ends || p.modules.some((m) => live(m.state) || m.state === 'stuck')) return
+  const when = Math.max(ends, ...p.modules.map((m) => m.stoppedAt ?? 0))
+  for (const m of p.modules) {
+    if (m.state !== 'pending') continue
+    const flight = inFlight(m)
+    if (flight) cancel(flight, when)
+    m.reason = `The project's ${p.goal!.hours}-hour budget ran out before ${m.id} started.`
+    move(m, 'abandoned', when)
+  }
 }
 
 /**
@@ -340,7 +400,7 @@ export function createProject(w: World, at: Ms, args: { agent: string; spec: Pro
   if (problem) return invalid('badSpec', problem)
   const spec = normalProject(args.spec)
   const a = agentOf(w, args.agent)
-  const openOne = a?.project && !projectEnded(a.project) ? a.project : null
+  const openOne = a?.project && !projectEnded(a.project, at) ? a.project : null
   const queuedAt = a?.queued.findIndex((q) => q.title === spec.title) ?? -1
 
   if (openOne?.title === spec.title) {
@@ -377,8 +437,10 @@ export function addModule(w: World, at: Ms, args: { agent: string; spec: ModuleS
   const a = agentOf(w, args.agent)
   if (!a) return notFound('noAgent', `There is no agent ${args.agent}.`)
   const p = a.project
-  if (!p || projectEnded(p)) return conflict('noOpenProject', `Agent ${a.id} has no open project. Create a project instead.`)
-  const problem = moduleProblem(args.spec, config)
+  if (!p || projectEnded(p, at)) return conflict('noOpenProject', `Agent ${a.id} has no open project. Create a project instead.`)
+  const ends = budgetEndsAt(p)
+  if (ends !== null && at >= ends) return conflict('budgetSpent', `Project "${p.title}" has used its ${p.goal!.hours === 1 ? '1 hour' : `${p.goal!.hours} hours`}, so no new module can start.`)
+  const problem = moduleProblem(args.spec, config) ?? goalMismatch(p.goal, args.spec)
   if (problem) return invalid('badSpec', problem)
   if (args.spec.retryOf !== undefined) return invalid('badSpec', 'Only an abandon follow-up can retry a module.')
   const spec = normalModule(args.spec)
@@ -386,8 +448,9 @@ export function addModule(w: World, at: Ms, args: { agent: string; spec: ModuleS
   if (same) return same.specKey === keyOf(spec) ? ok({ module: same.id, position: p.modules.indexOf(same) + 1 }) : conflict('titleTaken', `Project "${p.title}" already has a module titled "${spec.title}".`)
   const m = moduleFrom(a, spec, p.maxMinutes, config)
   m.added = true
-  // Right after the current module, behind any modules added before it that haven't started
-  let i = p.modules.indexOf(currentOf(p)!) + 1
+  // Right after the current module, behind any modules added before it that haven't started. With every module ended, last
+  const now = currentOf(p)
+  let i = now ? p.modules.indexOf(now) + 1 : p.modules.length
   while (p.modules[i]?.added && p.modules[i]!.state === 'pending') i++
   p.modules.splice(i, 0, m)
   advance(w, a, at, config)
@@ -515,7 +578,7 @@ export function abandon(
     return invalid('followUpRequired', `${m.id} has a win, so abandoning it takes a follow-up built on its best commit: a retry with a smaller targetGain, or new steps.`)
   if (!won && spec) return invalid('followUpNotAllowed', `${m.id} has no win to build on, so its commits are dropped. Add a new module instead.`)
   if (spec) {
-    const problem = moduleProblem(spec, config)
+    const problem = moduleProblem(spec, config) ?? goalMismatch(p.goal, spec)
     if (problem) return invalid('badSpec', problem)
     if (p.modules.some((x) => x.title === spec.title.trim())) return conflict('titleTaken', `Project "${p.title}" already has a module titled "${spec.title}".`)
     if (spec.retryOf !== undefined) {

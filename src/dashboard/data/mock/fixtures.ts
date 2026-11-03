@@ -4,7 +4,7 @@
 import type { Direction } from '../../../shared/api.ts'
 import { abandon, addModule, createProject, fileChange, freezeVerifiers, postAttempt, setBlurb, settle, stepDone } from '../../../server/domain/commands.ts'
 import { factsOf, firstInLine, locate, verifiersOf } from '../../../server/domain/queries.ts'
-import { MINUTE, emptyWorld, type ModuleSpec, type Ms, type VerifierSpec, type World } from '../../../server/domain/records.ts'
+import { MINUTE, emptyWorld, type ModuleSpec, type Ms, type ProjectGoalSpec, type VerifierSpec, type World } from '../../../server/domain/records.ts'
 import { MOCK_CONFIG, claim, finish, must, type BenchName, type Outcome, type ResultOptions } from './runner.ts'
 
 /** A stable fake hash: FNV-1a over the seed, as hex. */
@@ -65,10 +65,13 @@ export function verifiersFor(agent: string, p: Plan, hardware = 'cpu', version =
 
 const runnerFor = (w: World, agent: string, module: string) => (verifiersOf(locate(w, agent, module)!.m)?.hardware === 'gpu' ? 'gpu-runner-1' : 'runner-1')
 
-/** In the mock, a runner picks up each baseline job the moment it's queued. */
+/** In the mock, a runner picks up each baseline job the moment it's queued, and measures a project the moment it moves. */
 export function startBaselines(w: World, at: Ms) {
   settle(w, at, MOCK_CONFIG)
   for (const a of w.agents) {
+    // A project's measurement is queued before the next module's baseline, so the runner takes it first
+    for (const host of a.project?.modules ?? [])
+      if (host.jobs.some((j) => j.kind === 'final' && j.state === 'queued')) finish(w, claim(w, runnerFor(w, a.id, host.id), { agent: a.id, module: host.id, kind: 'final' }, at), { median: 0 }, {}, at)
     const m = a.project && firstInLine(a.project)
     if (m?.jobs.some((j) => j.kind === 'baseline' && j.state === 'queued')) claim(w, runnerFor(w, a.id, m.id), { agent: a.id, module: m.id, kind: 'baseline' }, at)
   }
@@ -98,9 +101,9 @@ function story(events: Event[], agent: string, t0: Ms) {
   const on = (min: number, run: Event['run']) => events.push({ at: t0 + min * MINUTE, run })
   const plans = new Map<string, Plan>()
   return {
-    project(min: number, title: string, modules: Plan[], maxMinutes?: number) {
+    project(min: number, title: string, modules: Plan[], { maxMinutes, goal }: { maxMinutes?: number; goal?: ProjectGoalSpec } = {}) {
       on(min, (w, at) => {
-        const spec = { title, startCommit: hex(`${agent}:${title}:start`, 40), modules: modules.map((m) => m.spec), ...(maxMinutes ? { maxMinutes } : {}) }
+        const spec = { title, startCommit: hex(`${agent}:${title}:start`, 40), modules: modules.map((m) => m.spec), ...(maxMinutes ? { maxMinutes } : {}), ...(goal ? { goal } : {}) }
         const r = must(createProject(w, at, { agent, spec }, MOCK_CONFIG))
         if (r.state === 'open') r.modules.forEach((id, i) => plans.set(id, modules[i]!))
       })
@@ -168,7 +171,7 @@ function searchPerf(events: Event[], t0: Ms) {
       ['Stream the JSON', 3],
       ['Drop unused fields', 2],
     ]),
-  ])
+  ], { goal: { metric: LATENCY.name, unit: LATENCY.unit, direction: LATENCY.direction, target: 300, hours: 10 } })
   s.project(-305, 'index-size', [plan(LATENCY, 'posting compression', 10, 24, [['Compress postings with PFOR', 5]])])
   s.verifiers(-302, ['m1', 'm2', 'm3', 'm4'])
   s.baseline(-300, 'm1', 415)
@@ -304,7 +307,7 @@ function decodeSpeed(events: Event[], t0: Ms) {
         ['Verify drafts in batches', 4],
       ]),
     ],
-    60,
+    { maxMinutes: 60 },
   )
   s.verifiers(-142, ['m1', 'm2', 'm3'], 'verifier', 'gpu')
   s.baseline(-140, 'm1', 1520)

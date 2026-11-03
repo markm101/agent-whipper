@@ -27,7 +27,7 @@ Every board line has this format:
 agent {id}: Project: {title}, Module ({position} / {total}): {title}, Progress: {done steps} / {total steps}, Blurb: {blurb}
 ```
 
-The agent writes one sentence about what it is working on. The server appends the rest of the blurb from its own records: the goal and its metric, the best value once a win has moved it, the streak when there is one, a warning when the current module is the project's last, and the time left. So the blurb always matches what the server has measured. Once the project ends, the line sums it up instead: how many modules passed and were abandoned, the metric's change over the project, and the commit a new project would start from. A final job measures that change: it runs the benchmark on the project's start commit and its final commit, alternating, on the last module's verifiers. Until it lands, the line gives an estimate that chains each module's gain. Values under 100 show three significant figures, so small numbers still show progress.
+The agent writes one sentence about what it is working on. The server appends the rest of the blurb from its own records: the goal and its metric, the best value once a win has moved it, the streak when there is one, the project goal and how far the project has come toward it, a warning when the current module is the project's last, and the time left. So the blurb always matches what the server has measured. Once the project ends, the line sums it up instead: how many modules passed and were abandoned, the metric's change over the project, and the commit a new project would start from. A final job measures that change: it runs the benchmark on the project's start commit and its final commit, alternating, on the last module's verifiers. Until it lands, the line gives an estimate that chains each module's gain. Values under 100 show three significant figures, so small numbers still show progress.
 
 ```
 agent 1: Project: search-perf, Module (2 / 5): query cache, Progress: 3 / 7, Blurb: Caching parsed queries. Goal: p95 latency 371 -> 334 ms, 10% lower. Best so far 352 ms. 2 wins in a row. 38 min left.
@@ -55,7 +55,15 @@ The server derives the baseline, the best value, the streak, the extensions, and
 
 An agent starts by creating a project with its start commit and its modules, each with steps and a goal. Steps build on each other in order, and a failed step makes its module stuck, so separate ideas for the same goal go in separate modules. The server can't check this, so the agent's instructions state it with an example: "try an LRU cache" and "try an LFU cache" are two modules, not two steps.
 
-Each agent has one open project at a time. A project sent while another is open joins the agent's queue and starts when the open project ends. A project ends when every module in it has passed or been abandoned.
+Each agent has one open project at a time. A project sent while another is open joins the agent's queue and starts when the open project ends. A project without a goal ends when every module in it has passed or been abandoned.
+
+### A project can climb toward a set goal
+
+You give the agent a goal for the whole climb in its prompt, such as "p95 latency under 250 ms within 8 hours", and the agent puts it in the project when it creates it. The goal names a metric, a unit, and a direction, and either a `target` value or a `targetGain` percentage over the start commit, with optional `hours`. It's frozen with the project, so the agent can't lower it later, and the dashboard shows it. Every module in the project measures the goal's metric, so their gains add up to it. Module targets stay within the 20% cap, and only the project goal can go past it, since modules chain.
+
+- **Measured, not estimated.** Each time a module ends and moves the commit the project has reached, a final job runs the benchmark on the start commit and that commit, alternating, on the verifiers of the last module that got there. A measurement still queued for a commit the project has moved past is dropped. The board line shows the goal on every line, with where the project started and where it is now.
+- **The goal holds the project open.** When every module has ended, the project waits for the measurement. If it shows the goal unmet, the project is short of its goal: the board line tells the agent to add a module, which goes last and starts from the reached commit.
+- **What ends it.** A measurement that shows the goal met. Its hours, counted from when the project opened: after them, no module starts, the one running finishes on its own clock, and pending modules are abandoned. Or 3 modules in a row that started and ended without a win, since an agent churning on an unreachable goal is better stopped and flagged. A planned module always gets its turn, so the last two rules only stop a project whose planned modules have run out.
 
 New work that belongs to the open project becomes a module instead of a project. So does another approach to a goal. A new module comes with its own steps and goal, goes right after the current module, behind any modules added earlier that haven't started, and needs verifiers before it can start. The answer gives its position.
 
@@ -161,7 +169,7 @@ Agent calls carry the agent ID in the path and the agent token. Runner calls car
 
 | Call | Token | Effect |
 |---|---|---|
-| `POST /agents/{id}/projects` | agent | Creates a project with its start commit, modules, steps, and goals, and returns the module IDs. While another project is open, queues it instead |
+| `POST /agents/{id}/projects` | agent | Creates a project with its start commit, modules, steps, and goals, and an optional goal for the whole climb, and returns the module IDs. While another project is open, queues it instead |
 | `PUT /agents/{id}/blurb` | agent | Sets the agent's sentence in its blurb |
 | `POST /agents/{id}/modules` | agent | Adds a module with its steps and goal right after the current module, and returns its ID |
 | `POST /agents/{id}/modules/{m}/verifiers` | agent | Submits a module's verifiers, which freeze on submission |
@@ -174,7 +182,7 @@ Agent calls carry the agent ID in the path and the agent token. Runner calls car
 | `GET /agents/{id}/modules/{m}/steps/{n}` | agent | Returns whether the step is done or skipped, and what its latest step check found |
 | `POST /agents/{id}/modules/{m}/steps/{n}/done` | agent | Queues a step check for the current step, and marks it done when the check passes |
 | `POST /agents/{id}/modules/{m}/abandon` | agent | Records the abandon reason for a pending, active, or stuck module. If the module has a win, it also takes the follow-up module. Returns the commit the next module starts from |
-| `GET /agents/{id}/project` | agent | Returns the agent's project in brief: each module's ID, state, steps, goal, and whether its verifiers are missing, frozen, or failed at the baseline, so a verifier agent can find the modules that need verifiers |
+| `GET /agents/{id}/project` | agent | Returns the agent's project in brief: its goal, standing, and latest measurement, and each module's ID, state, steps, goal, and whether its verifiers are missing, frozen, or failed at the baseline, so a verifier agent can find the modules that need verifiers |
 | `GET /agents/{id}` | agent | Returns the agent's board line, or `no open project` before its first one |
 | `GET /board` | agent or admin | Returns every agent's board line as plain text |
 | `GET /` | admin | Serves the dashboard. Any page load (`Accept: text/html`) gets the dashboard, so `/agents/1` is a page in a browser and the board line for `curl`. A browser without the dashboard's cookie gets a sign-in page that asks for the admin token |

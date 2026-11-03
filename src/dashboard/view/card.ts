@@ -1,8 +1,9 @@
-// Card A: the eight lines an agent's card shows, worked out from the agent.
+// Card A: the nine lines an agent's card shows, worked out from the agent.
 // Every state fills the same lines in the same order; a state changes a tone
 // or a word and adds at most one callout, never removes a line.
-import type { Agent, Module } from '../../shared/api.ts'
+import type { Agent, Module, Project } from '../../shared/api.ts'
 import { minutesBetween, minutesLeft } from '../../shared/clock.ts'
+import { goalNumbers, metGoal } from '../../shared/projectGoal.ts'
 import { WAITING, figure, flagTitle, plural } from './format.ts'
 import { currentModule, currentStep, inFlight } from './module.ts'
 
@@ -19,6 +20,8 @@ export interface CardView {
   target: string
   bar: { share: number; tone: 'accent' | 'ink' | 'success' }
   under: { text: string; chip: string | null }
+  /** The project's goal and how far the project has come toward it. Null without one. */
+  goal: { text: string; now: string | null; share: number; tone: 'accent' | 'success' | 'warning' } | null
   blurb: string | null
   callout: { tone: 'warning' | 'danger'; text: string } | null
 }
@@ -87,6 +90,29 @@ function dotTone(m: Module): CardTone {
   return m.clock.kind === 'grace' ? 'warning' : 'accent'
 }
 
+function goalLine(p: Project): CardView['goal'] {
+  const g = p.goal
+  if (!g) return null
+  const { target, now, share } = goalNumbers(p)
+  const met = metGoal(p)
+  const aim = target === null ? `${g.targetGain}% ${g.direction}` : `${figure(target)} ${g.unit}`
+  const short = p.state === 'short' || (p.state === 'ended' && !met)
+  return {
+    text: met ? `Project goal met: ${aim}` : short ? `Short of its goal: ${aim}` : `Project goal: ${aim}`,
+    now: now === null ? null : `now ${figure(now)} ${g.unit}`,
+    share,
+    tone: met ? 'success' : short ? 'warning' : 'accent',
+  }
+}
+
+/** The project's standing, which outranks the module's once every module has ended. */
+function standing(p: Project): Pick<CardView, 'corner' | 'callout'> | null {
+  if (p.state === 'measuring') return { corner: { text: 'Measuring', tone: 'faint' }, callout: null }
+  if (p.state === 'short') return { corner: { text: 'Short of goal', tone: 'warning' }, callout: { tone: 'warning', text: 'Every module has ended short of the project goal. The agent has to add a module.' } }
+  if (p.state === 'ended' && p.goal) return { corner: metGoal(p) ? { text: 'Goal met', tone: 'success' } : { text: 'Ended short', tone: 'faint' }, callout: null }
+  return null
+}
+
 /** The module a card is about: the current one, or the last one once the project has ended. */
 export function cardModule(a: Agent): Module | null {
   return currentModule(a) ?? a.project?.modules.at(-1) ?? null
@@ -99,16 +125,18 @@ export function cardView(a: Agent, now: number): CardView | null {
   if (!p || !m) return null
   const s = m.status.state
   const met = s === 'pastTarget' || s === 'passed'
+  const project = standing(p)
   return {
-    dot: { tone: dotTone(m), busy: inFlight(m) !== null },
-    corner: corner(m, now),
+    dot: { tone: p.state === 'short' ? 'warning' : dotTone(m), busy: inFlight(m) !== null || p.progress?.state === 'measuring' },
+    corner: project?.corner ?? corner(m, now),
     sub: `${p.title} · ${m.title}`,
     metric: m.goal.metric,
     value: m.best === null ? { kind: 'none', text: 'Not measured yet' } : { kind: 'number', best: m.best, unit: m.goal.unit },
     target: m.goal.target === null ? `target ${m.goal.targetGain}%` : `target ${figure(m.goal.target)}`,
     bar: { share: met ? 1 : progress(m), tone: met ? 'success' : s === 'stuck' ? 'ink' : 'accent' },
     under: under(m, a.queued[0] ?? null),
+    goal: goalLine(p),
     blurb: a.blurb || null,
-    callout: callout(m, now),
+    callout: project ? project.callout : callout(m, now),
   }
 }

@@ -10,10 +10,10 @@ Rejections come back as `{"error": "<code>", "message": "<sentence>"}`: 400 for 
 
 | Call | What it does |
 |---|---|
-| `POST /agents/{id}/projects` | Creates a project, or queues it while another is open |
-| `GET /agents/{id}/project` | The project in brief: each module's ID, state, steps, goal, and whether its verifiers are `missing`, `frozen`, or `failed` at the baseline |
+| `POST /agents/{id}/projects` | Creates a project, with an optional goal for the whole climb, or queues it while another is open |
+| `GET /agents/{id}/project` | The project in brief: its goal, its state (`open`, `measuring`, `short` of its goal, or `ended`), its latest measurement, and each module's ID, state, steps, goal, and whether its verifiers are `missing`, `frozen`, or `failed` at the baseline |
 | `PUT /agents/{id}/blurb` | Sets the agent's sentence |
-| `POST /agents/{id}/modules` | Adds a module right after the current one, behind any added earlier that haven't started |
+| `POST /agents/{id}/modules` | Adds a module right after the current one, behind any added earlier that haven't started, or last in a project short of its goal |
 | `GET /agents/{id}/modules/{m}` | Reads a module whole, with its verifiers' commands and file paths |
 | `POST /agents/{id}/modules/{m}/verifiers` | Submits and freezes a module's verifiers |
 | `POST /agents/{id}/modules/{m}/verifiers/changes` | Files a change request |

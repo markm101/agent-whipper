@@ -1,0 +1,40 @@
+.goal {
+  display: grid;
+  gap: 10px;
+}
+
+.goal__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.goal__aim {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.goal__head .badge {
+  margin-left: auto;
+}
+
+.goal__bar.meter {
+  height: 6px;
+}
+
+.goal__numbers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.goal__target {
+  margin-left: auto;
+}
+
+.goal__notes {
+  color: var(--text);
+}

@@ -40,7 +40,7 @@ function agentWith(m: Module | null, over: Partial<Agent> = {}): Agent {
     id: '1' as AgentId,
     blurb: 'Skipping low-impact query terms.',
     line: '',
-    project: m ? { title: 'search-perf', modules: [m], current: m.status.state === 'passed' ? null : m.id } : null,
+    project: m ? { title: 'search-perf', goal: null, end: null, progress: null, reached: null, noWinRun: 0, state: m.status.state === 'passed' ? 'ended' : 'open', modules: [m], current: m.status.state === 'passed' ? null : m.id } : null,
     queued: [],
     ...over,
   }
