@@ -182,7 +182,7 @@ Agent calls carry the agent ID in the path and the agent token. Runner calls car
 
 ## Hooks put the board line in front of the agent
 
-A Claude Code or Codex hook calls `GET /agents/{id}` and adds the board line to the agent's context. It should run on every agent turn. Which hook event does that during a long autonomous run is still to be tested. If the server is unreachable, the hook prints a warning and lets the agent continue, because blocking every agent on one outage would end the whole overnight run.
+A Claude Code or Codex hook calls `GET /agents/{id}` and adds the board line to the agent's context before every model request. `UserPromptSubmit` covers the first request of each prompt. In Claude Code, `PostToolBatch` covers the rest of a long autonomous run, once per round of tool calls. Codex has no batch event, so there `PostToolUse` covers them, once per tool call. Only `SessionStart` and `UserPromptSubmit` pass plain stdout to the model, so for the other events the hook prints the line as `hookSpecificOutput.additionalContext` JSON. Codex's `PreModelRequest` fires before every model request, which would suit the line best, but Codex 0.165.0 drops its output. If the server is unreachable, the hook prints a warning and lets the agent continue, because blocking every agent on one outage would end the whole overnight run.
 
 ## Stack
 
@@ -204,4 +204,4 @@ A Claude Code or Codex hook calls `GET /agents/{id}` and adds the board line to 
 These two are facts to measure, not choices to make.
 
 - Are 5 runs per commit enough to separate real gains from noise? This needs measuring on real benchmarks.
-- Which hook event runs often enough during a long autonomous run? This needs a test on Claude Code and on Codex.
+- Does the board line come back soon enough after the agent's context is compacted? The hook tests never ran long enough to compact. The next round of tool calls adds the line again, but the request right after compaction may go without it.
