@@ -74,7 +74,7 @@ export function maxMinutesProblem(x: unknown, config: Config): string | null {
 
 export function goalProblem(g: GoalSpec | undefined): string | null {
   if (!g || typeof g !== 'object') return 'A module needs a goal.'
-  if (!isText(g.metric, 80)) return 'The goal needs a metric.'
+  if (!isText(g.metric, 80)) return 'The goal needs a metric of at most 80 characters.'
   if (typeof g.unit !== 'string' || g.unit.length > 20) return 'The goal needs a unit, such as ms.'
   if (g.direction !== 'lower' && g.direction !== 'higher') return 'The goal direction must be lower or higher.'
   if (g.ambitious !== undefined && typeof g.ambitious !== 'boolean') return 'ambitious must be true or false.'
@@ -98,16 +98,16 @@ export const goalOf = (g: GoalSpec): Goal => ({
 
 export function moduleProblem(s: ModuleSpec | undefined, config: Config): string | null {
   if (!s || typeof s !== 'object') return 'A module spec must be an object.'
-  if (!isText(s.title, 80)) return 'A module needs a one-line title.'
+  if (!isText(s.title, 80)) return 'A module needs a one-line title of at most 80 characters.'
   if (!Array.isArray(s.steps) || s.steps.length === 0) return `Module "${s.title}" needs at least one step.`
   if (s.steps.length > 20) return `Module "${s.title}" has more than 20 steps. Split it into modules.`
-  if (!s.steps.every((x) => isText(x, 120))) return `Every step of "${s.title}" needs a one-line title.`
+  if (!s.steps.every((x) => isText(x, 120))) return `Every step of "${s.title}" needs a one-line title of at most 120 characters.`
   return goalProblem(s.goal) ?? maxMinutesProblem(s.maxMinutes, config)
 }
 
 export function projectProblem(s: ProjectSpec | undefined, config: Config): string | null {
   if (!s || typeof s !== 'object') return 'A project spec must be an object.'
-  if (!isText(s.title, 80)) return 'A project needs a one-line title.'
+  if (!isText(s.title, 80)) return 'A project needs a one-line title of at most 80 characters.'
   if (!isCommit(s.startCommit)) return 'startCommit must be a full commit hash, such as the output of git rev-parse HEAD.'
   if (s.repo !== undefined && (!isText(s.repo, 300) || /\s/.test(s.repo))) return 'repo must be a git remote URL.'
   if (!Array.isArray(s.modules) || s.modules.length === 0) return 'A project needs at least one module.'

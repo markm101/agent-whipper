@@ -22,7 +22,7 @@ import { agentOf, currentOf, factsOf, locate } from './queries.ts'
 import { DEFAULTS, MINUTE, emptyWorld, type GoalSpec, type ModuleSpec, type Ms, type VerifierSpec, type World } from './records.ts'
 import type { RejectionCode, Result } from './result.ts'
 import { LIFECYCLE, nextState } from './rules.ts'
-import { attemptDetailOf, attemptStatusOf, boardOf, boardText, changeOf } from './view.ts'
+import { attemptDetailOf, attemptStatusOf, boardOf, boardText, changeOf, stepStatusOf } from './view.ts'
 
 const T0 = Date.parse('2026-11-03T00:00:00Z')
 const at = (min: number): Ms => T0 + min * MINUTE
@@ -571,4 +571,35 @@ test('repeating a project after it ended returns the first answer', () => {
   attempt(w, at(5), 'a1', 89)
   const spec = { title: 'search', startCommit: START, modules: [mod('cache', ['only'])] }
   assert.deepEqual(must(createProject(w, at(6), { agent: 'a', spec })), { state: 'ended', modules: ['m1'] })
+})
+
+test('an attempt’s answer carries its numbers and says why it got its verdict', () => {
+  const w = started()
+  attempt(w, at(5), 'a1', 95)
+  const win = attemptStatusOf(w, 'a', 'm1', 'a1', at(5))!
+  assert.deepEqual([win.verdict, win.median, win.bestMedian, win.tests], ['win', 95, 100, { passed: 10, total: 10 }])
+  assert.equal(win.gain, 5)
+  assert.match(win.why, /^Win: 5\.0% lower than the best commit \(needs 2%\), p = 0\.004 \(needs below 0\.05\)\.$/)
+  attempt(w, at(10), 'a2', 94)
+  assert.match(attemptStatusOf(w, 'a', 'm1', 'a2', at(10))!.why, /^Flat: 1\.1% lower than the best commit; needs 2%\.$/)
+  attempt(w, at(15), 'a3', 110)
+  assert.match(attemptStatusOf(w, 'a', 'm1', 'a3', at(15))!.why, /^Fail: 16% higher than the best commit, and the rank test shows it's reliably worse/)
+  attempt(w, at(20), 'a4', 90, { tests: [8, 10] })
+  assert.equal(attemptStatusOf(w, 'a', 'm1', 'a4', at(20))!.why, 'Fail: 2 of 10 tests failed.')
+  must(postAttempt(w, at(25), { agent: 'a', module: 'm1', attempt: 'a5', commit: commit('a5'), note: 'Try.' }))
+  assert.equal(attemptStatusOf(w, 'a', 'm1', 'a5', at(25))!.why, 'Queued for a runner.')
+})
+
+test('a step’s answer shows what its check found, and steps a module passed without are skipped', () => {
+  const w = started([mod('cache', ['one', 'two', 'three'])])
+  must(stepDone(w, at(2), { agent: 'a', module: 'm1', step: 1 }))
+  assert.equal(stepStatusOf(w, 'a', 'm1', 1)!.check!.why, 'Queued for a runner.')
+  run(w, at(3), 100, { tests: [9, 10] })
+  const failed = stepStatusOf(w, 'a', 'm1', 1)!
+  assert.deepEqual([failed.done, failed.check!.tests, failed.check!.why], [false, { passed: 9, total: 10 }, '1 of 10 tests failed, so the step stays open.'])
+  attempt(w, at(5), 'a1', 89)
+  assert.equal(viewOf(w, 'm1', at(5)).status.state, 'passed')
+  assert.deepEqual([stepStatusOf(w, 'a', 'm1', 2)!.skipped, stepStatusOf(w, 'a', 'm1', 2)!.check], [true, null])
+  rejects(w, at(6), (x) => stepDone(x, at(6), { agent: 'a', module: 'm1', step: 1 }), 'wrongState')
+  assert.equal(stepStatusOf(w, 'a', 'm1', 9), null)
 })

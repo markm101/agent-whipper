@@ -9,10 +9,13 @@ Every call carries the agent token. In the examples, `$W` is the server's addres
 The hook shows you a line like this with each prompt and after each round of tool calls:
 
 ```
-agent 1: Project: search-perf, Module (2 / 5): query cache, Progress: 1 / 3, Blurb: Caching parsed queries. Goal: p95 latency 371 -> 334 ms, 10% lower. 38 min left.
+agent 1: Project: search-perf, Module (2 / 5): query cache, Progress: 1 / 3, Blurb: Caching parsed queries. Goal: p95 latency 371 -> 334 ms, 10% lower. Best so far 352 ms. 38 min left.
 ```
 
-The server writes everything after your sentence: the goal, the streak, and the time left. Read the line to know which module and step you're on, and how long you have. `GET $W/agents/$ID` returns the same line.
+The server writes everything after your sentence: the goal, the best value once you have a win, the streak, and the time left. Read the line to know which module and step you're on, and how long you have. `GET $W/agents/$ID` returns the same line, or `no open project` before you create one.
+
+- **"Last module in the project."** The project ends as soon as this module does. If you have more ideas, add them as modules now.
+- **When the project ends,** the line sums it up and names the commit to start from, such as `Project: search-perf ended: 4 passed, 1 abandoned. p95 latency 415 -> 331 ms. To keep climbing, create a new project from 9be1c04.` Expand it with `git rev-parse 9be1c04` for the new project's `startCommit`.
 
 ## Plan the climb as a project
 
@@ -41,7 +44,7 @@ curl -sS -X POST "$W/agents/$ID/modules" -H "$AUTH" -H 'content-type: applicatio
   -d '{ "title": "early termination", "steps": ["Skip low-impact terms"], "goal": { "metric": "p95 latency", "unit": "ms", "direction": "lower", "targetGain": 10 } }'
 ```
 
-A module can set `maxMinutes`, and so can a project for its modules. The default is 90 minutes and the ceiling is 120.
+A module can set `maxMinutes`, and so can a project for its modules. The default is 90 minutes and the ceiling is 120. Titles are one line: at most 80 characters for a project or module, 120 for a step, and 500 for an attempt's note.
 
 ## Keep your blurb current
 
@@ -66,13 +69,15 @@ A runner tests and benchmarks it against the best commit, and the server judges 
 - **flat**: anything else that passes the tests. Only the head commit moves, so preparation for later steps is kept.
 - **fail**: failing tests, a job killed at its time limit, a commit the runner can't fetch, or a reliably worse benchmark. Go back to the head commit.
 
-Poll for the verdict. The answer also gives the step's failed turns, the streak, and the module's state:
+Poll for the verdict. The answer gives the runner's numbers: `median`, `bestMedian` (the best commit's median in the same job), `gain` (percent better, negative when worse), `p`, and `tests`. It also gives `why`, one sentence such as "Flat: 1.1% lower than the best commit; needs 2%.", plus the step's failed turns, the streak, and the module's state:
 
 ```sh
 curl -sS "$W/agents/$ID/modules/m1/attempts/a7" -H "$AUTH"
 ```
 
 Only one job runs per module at a time, so wait for a verdict before posting the next attempt. Reposting a commit returns its stored result; it won't be measured again.
+
+While a job is measuring, don't run heavy work, such as a test suite or your own benchmark, on the machine the runner shares with you. It skews the runs and can turn a real gain into a flat.
 
 ## Finish steps
 
@@ -81,6 +86,14 @@ When the current step's work is in the head commit, mark it done. That queues a 
 ```sh
 curl -sS -X POST "$W/agents/$ID/modules/m1/steps/1/done" -H "$AUTH"
 ```
+
+The answer says `"done": false` while the check runs. Read the step to see what the check found:
+
+```sh
+curl -sS "$W/agents/$ID/modules/m1/steps/1" -H "$AUTH"
+```
+
+A module that passes before its last step skips the rest, and the step shows `"skipped": true`.
 
 ## When a module ends or gets stuck
 
@@ -92,7 +105,7 @@ curl -sS -X POST "$W/agents/$ID/modules/m2/abandon" -H "$AUTH" -H 'content-type:
   -d '{ "reason": "Every attempt assumed smaller postings would cut latency, but decoding them costs more than the reads save." }'
 ```
 
-If the module has a win, the abandon call also takes a follow-up module that starts from its best commit: either a retry of the same steps with a smaller `targetGain` (add `"retryOf": "m2"`, allowed once), or new steps built on that commit. Send it as `"followUp"` with the same fields as a new module.
+You can also abandon a pending or active module early, when you've learned that its approach won't reach the goal. If the module has a win, the abandon call also takes a follow-up module that starts from its best commit: either a retry of the same steps with a smaller `targetGain` (add `"retryOf": "m2"`, allowed once), or new steps built on that commit. Send it as `"followUp"` with the same fields as a new module.
 
 ## Time
 

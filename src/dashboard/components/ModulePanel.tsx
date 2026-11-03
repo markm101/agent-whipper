@@ -14,10 +14,12 @@ function StepList({ m }: { m: Module }) {
   const s = m.status
   const failed = s.state === 'stuck' && s.cause === 'step' ? current : null
   const counting = s.state === 'active' || failed !== null
+  // A module that passed or was abandoned before its last step skips the rest
+  const over = s.state === 'passed' || s.state === 'abandoned'
   return (
     <ol className="steps">
       {m.steps.map((step, i) => {
-        const state = step.done ? 'done' : i === failed ? 'failed' : i === current ? 'current' : 'later'
+        const state = step.done ? 'done' : over ? 'skipped' : i === failed ? 'failed' : i === current ? 'current' : 'later'
         const turns = counting && (state === 'current' || state === 'failed') ? `${step.failedTurns} of ${TURNS} failed turns` : null
         return (
           <li key={i} className="steps__row" data-state={state}>
@@ -29,6 +31,7 @@ function StepList({ m }: { m: Module }) {
             <span className="steps__status">
               {state === 'done' && 'Done'}
               {state === 'failed' && 'Failed'}
+              {state === 'skipped' && 'Skipped'}
               {state === 'current' && (s.state === 'pending' ? 'First' : 'Current')}
               {turns && (
                 <span className="steps__turns" data-some={step.failedTurns > 0 || undefined}>

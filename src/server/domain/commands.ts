@@ -373,7 +373,7 @@ export function fileChange(
   const current = verifiersOf(m)
   if (!current) return conflict('verifiersMissing', `${m.id} has no verifiers to change. Submit them instead.`)
   if (!takes('verifiers', m.state)) return conflict('wrongState', `${m.id} has ended, so its verifiers can't change.`)
-  if (!isText(args.reason, 300)) return invalid('badSpec', 'A change request needs a one-line reason.')
+  if (!isText(args.reason, 300)) return invalid('badSpec', 'A change request needs a one-line reason of at most 300 characters.')
   const problem = verifierProblem(args.proposed, m.steps.length)
   if (problem) return invalid('badSpec', problem)
   if (args.proposed.hash === current.hash) return invalid('badSpec', 'The proposed verifiers are the frozen ones.')
@@ -401,7 +401,7 @@ export function postAttempt(
   const { a, p, m } = found.value
   if (typeof args.attempt !== 'string' || !/^[A-Za-z0-9_.-]{1,60}$/.test(args.attempt)) return invalid('badSpec', 'An attemptId is 1 to 60 letters, digits, dots, dashes, or underscores.')
   if (!isCommit(args.commit)) return invalid('badSpec', 'commit must be a full commit hash, such as the output of git rev-parse HEAD.')
-  if (!isText(args.note, 500)) return invalid('badSpec', 'An attempt needs a one-line note.')
+  if (!isText(args.note, 500)) return invalid('badSpec', 'An attempt needs a one-line note of at most 500 characters.')
   const commit = args.commit.toLowerCase() as Commit
   const posted = m.attempts.find((x) => x.id === args.attempt)
   if (posted) return posted.commit === commit ? ok({ attempt: posted.id, job: posted.job }) : conflict('attemptIdTaken', `Attempt ${posted.id} was posted with commit ${posted.commit}.`)
@@ -429,7 +429,8 @@ export function stepDone(w: World, at: Ms, args: { agent: string; module: string
   const n = args.step
   if (!Number.isInteger(n) || n < 1 || n > m.steps.length) return invalid('badSpec', `${m.id} has steps 1 to ${m.steps.length}.`)
   if (m.steps[n - 1]!.doneAt !== null) return ok({ job: null, done: true })
-  if (!takes('stepCheck', m.state)) return conflict('wrongState', `${m.id} is ${m.state}, so it takes no step checks.`)
+  if (!takes('stepCheck', m.state))
+    return conflict('wrongState', m.state === 'passed' ? `${m.id} has passed, so its remaining steps are skipped and it takes no step checks.` : `${m.id} is ${m.state}, so it takes no step checks.`)
   const f = factsOf(p, m, at)
   if (f.inFlight?.kind === 'stepCheck' && f.inFlight.step === n) return ok({ job: f.inFlight.id, done: false })
   if (f.inFlight) return conflict('jobInFlight', `${m.id} already has a ${f.inFlight.kind} job in flight. Wait for it to finish.`)
@@ -454,7 +455,7 @@ export function abandon(
   const { a, p, m } = found.value
   if (m.state === 'abandoned') return ok({ followUp: m.followUp })
   if (!takes('abandon', m.state)) return conflict('wrongState', `${m.id} is ${m.state}, and only a pending, active, or stuck module can be abandoned.`)
-  if (!isText(args.reason, 300)) return invalid('badSpec', 'The abandon reason is one sentence naming the assumption the attempts shared.')
+  if (!isText(args.reason, 300)) return invalid('badSpec', 'The abandon reason is one sentence of at most 300 characters, naming the assumption the attempts shared.')
   const won = lastWin(m) !== null
   const spec = args.followUp
   if (won && !spec)

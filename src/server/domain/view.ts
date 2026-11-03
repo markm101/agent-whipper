@@ -1,10 +1,10 @@
 // What the server sends: the records turned into the Board and AttemptDetail
 // of src/shared/api.ts, the plain-text board lines, and the small answers to
 // an agent's GET calls. Read-only; settle the world first.
-import type { Agent, AgentId, Attempt, AttemptDetail, AttemptId, Board, ChangeId, Clock, Iso, Module, ModuleId, ModuleStatus, Verdict } from '../../shared/api.ts'
+import type { Agent, AgentId, Attempt, AttemptDetail, AttemptId, Board, ChangeId, Clock, Iso, JobId, Module, ModuleId, ModuleStatus, Verdict } from '../../shared/api.ts'
 import { boardLine } from '../../shared/boardLine.ts'
 import { currentOf, factsOf, failedTurns, firstInLine, locate, measured, verifiersOf, type Facts } from './queries.ts'
-import { MINUTE, iso, type AgentRec, type AttemptRec, type ModuleRec, type Ms, type ProjectRec, type World } from './records.ts'
+import { MINUTE, iso, type AgentRec, type AttemptRec, type JobRec, type ModuleRec, type Ms, type ProjectRec, type World } from './records.ts'
 
 const jobOf = (m: ModuleRec, x: AttemptRec) => m.jobs.find((j) => j.id === x.job)!
 
@@ -123,6 +123,15 @@ export interface AttemptStatus {
   attempt: AttemptId
   job: Attempt['job']
   verdict: Verdict | null
+  /** One sentence on why the verdict is what it is, or what the job is doing. */
+  why: string
+  /** Median of the attempt's runs, and of the best commit's runs in the same job. */
+  median: number | null
+  bestMedian: number | null
+  /** Percent better than the best commit, in the goal's direction; negative when worse. */
+  gain: number | null
+  p: number | null
+  tests: { passed: number; total: number } | null
   step: number
   failedTurns: number
   streak: number
@@ -130,20 +139,99 @@ export interface AttemptStatus {
   line: string
 }
 
+const pct = (n: number) => `${Math.abs(n) < 10 ? Math.abs(n).toFixed(1) : Math.round(Math.abs(n))}%`
+const pText = (p: number) => (p < 0.001 ? 'p < 0.001' : `p = ${p.toFixed(3)}`)
+
+/** Why a job's verdict came out as it did, in one sentence, so a flat result can be told from a noisy one. */
+function why(m: ModuleRec, x: AttemptRec, j: JobRec): string {
+  const state = j.state
+  if (state === 'queued') return 'Queued for a runner.'
+  if (state === 'running') return `Running on ${j.claims.at(-1)?.runner ?? 'a runner'}.`
+  if (state === 'cancelled') return 'Cancelled when the module was abandoned.'
+  const r = j.results
+  if (!x.judged || !r) {
+    const error = j.claims.findLast((c) => c.error)?.error
+    return `No verdict: no runner could run the job${error ? ` (${error})` : ''}. It doesn't count as a failed turn.`
+  }
+  const d = x.judged
+  if (r.outcome === 'killed') return 'Fail: the job ran past its time limit.'
+  if (r.outcome === 'badCommit') return `Fail: the runner couldn't fetch the commit${r.error ? `: ${r.error}` : ''}`.replace(/\.?$/, '.')
+  if (r.tests && r.tests.passed < r.tests.total) return `Fail: ${r.tests.total - r.tests.passed} of ${r.tests.total} tests failed.`
+  if (d.gain === null || d.p === null) return 'Fail: the benchmark measured nothing on this commit.'
+  const { direction, minGain } = m.goal
+  const way = d.gain >= 0 ? direction : direction === 'lower' ? 'higher' : 'lower'
+  const moved = `${pct(d.gain)} ${way} than the best commit`
+  if (d.verdict === 'win') return `Win: ${moved} (needs ${minGain}%), ${pText(d.p)} (needs below 0.05).`
+  if (d.verdict === 'fail') return `Fail: ${moved}, and the rank test shows it's reliably worse (${pText(d.p)}).`
+  if (d.gain < 0) return `Flat: ${moved}, but not reliably worse (${pText(d.p)}).`
+  const short = [d.gain < minGain && `needs ${minGain}%`, d.p >= 0.05 && `${pText(d.p)}, needs below 0.05`].filter(Boolean).join('; ')
+  return `Flat: ${moved}; ${short}.`
+}
+
 export function attemptStatusOf(w: World, agent: string, module: string, attempt: string, now: Ms): AttemptStatus | null {
   const found = locate(w, agent, module)
   const x = found?.m.attempts.find((y) => y.id === attempt)
   if (!found || !x) return null
   const { a, p, m } = found
+  const j = jobOf(m, x)
   return {
     attempt: x.id,
-    job: jobOf(m, x).state,
+    job: j.state,
     verdict: x.judged?.verdict ?? null,
+    why: why(m, x, j),
+    median: x.judged?.median ?? null,
+    bestMedian: x.judged?.bestMedian ?? null,
+    gain: x.judged?.gain ?? null,
+    p: x.judged?.p ?? null,
+    tests: j.results?.tests ?? null,
     step: x.step,
     failedTurns: failedTurns(m, x.step),
     streak: factsOf(p, m, now).streak,
     module: statusOf(p, m),
     line: agentView(a, now).line,
+  }
+}
+
+/** GET /agents/{id}/modules/{m}/steps/{n}: a step, and what its latest check found. */
+export interface StepStatus {
+  step: number
+  title: string
+  done: boolean
+  /** Whether the finished step held the metric. Null until it's done. */
+  held: boolean | null
+  failedTurns: number
+  /** Passed or abandoned before this step was done. */
+  skipped: boolean
+  check: { job: JobId; state: Attempt['job']; tests: { passed: number; total: number } | null; why: string } | null
+  module: ModuleStatus
+}
+
+export function stepStatusOf(w: World, agent: string, module: string, n: number): StepStatus | null {
+  const found = locate(w, agent, module)
+  const step = found?.m.steps[n - 1]
+  if (!found || !step || !Number.isInteger(n)) return null
+  const { p, m } = found
+  const j = m.jobs.findLast((x) => x.kind === 'stepCheck' && x.step === n) ?? null
+  const checkWhy = (job: JobRec) => {
+    if (job.state === 'queued') return 'Queued for a runner.'
+    if (job.state === 'running') return `Running on ${job.claims.at(-1)?.runner ?? 'a runner'}.`
+    if (job.state === 'cancelled') return 'Cancelled when the module was abandoned.'
+    const r = job.results
+    if (!r) return `No result: no runner could run the check. Mark the step done again to retry.`
+    if (r.outcome === 'killed') return 'The check ran past its time limit, so the step stays open.'
+    if (r.outcome === 'badCommit') return "The runner couldn't fetch the head commit, so the step stays open."
+    if (r.tests && r.tests.passed < r.tests.total) return `${r.tests.total - r.tests.passed} of ${r.tests.total} tests failed, so the step stays open.`
+    return step.held === false ? 'The tests passed and the step is done, but the metric got worse, so it earned no extension.' : 'The tests passed, the step is done, and the metric held.'
+  }
+  return {
+    step: n,
+    title: step.title,
+    done: step.doneAt !== null,
+    held: step.held,
+    failedTurns: failedTurns(m, n),
+    skipped: step.doneAt === null && (m.state === 'passed' || m.state === 'abandoned'),
+    check: j && { job: j.id, state: j.state, tests: j.results?.tests ?? null, why: checkWhy(j) },
+    module: statusOf(p, m),
   }
 }
 

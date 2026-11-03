@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import type { Agent, AgentId, Clock, Iso, Module, ModuleId } from './api.ts'
+import type { Agent, AgentId, Clock, Commit, Iso, Module, ModuleId } from './api.ts'
 import { boardLine } from './boardLine.ts'
 
 const now = new Date('2026-11-03T02:22:00Z')
@@ -50,8 +50,29 @@ function agentWith(m: Module): Agent {
 test('matches the format in DESIGN.md', () => {
   assert.equal(
     boardLine(agentWith(moduleWith({})), now),
-    'agent 1: Project: search-perf, Module (2 / 5): query cache, Progress: 3 / 7, Blurb: Caching parsed queries. Goal: p95 latency 371 -> 334 ms, 10% lower. 2 wins in a row. 38 min left.',
+    'agent 1: Project: search-perf, Module (2 / 5): query cache, Progress: 3 / 7, Blurb: Caching parsed queries. Goal: p95 latency 371 -> 334 ms, 10% lower. Best so far 352 ms. 2 wins in a row. 38 min left.',
   )
+  // No best until a win moves it off the baseline
+  assert.doesNotMatch(boardLine(agentWith(moduleWith({ best: 371 })), now), /Best so far/)
+})
+
+test('warns while the current module is the last one, so the agent can add another before the project ends', () => {
+  const m = moduleWith({})
+  const a = agentWith(m)
+  a.project!.modules = a.project!.modules.map((x) => (x.id === m.id ? x : { ...x, status: { state: 'passed' } }))
+  assert.match(boardLine(a, now), /2 wins in a row\. Last module in the project\. 38 min left\.$/)
+})
+
+test('an ended project sums up what it did and where to start the next one', () => {
+  const passed = (id: string, position: number, baseline: number, best: number, head: string) =>
+    moduleWith({ id: id as ModuleId, position, status: { state: 'passed' }, goal: { ...moduleWith({}).goal, baseline }, best, headCommit: head as Commit })
+  const a = agentWith(moduleWith({}))
+  a.project = {
+    title: 'search-perf',
+    current: null,
+    modules: [passed('m1', 1, 415, 371, 'a'.repeat(40)), { ...moduleWith({ id: 'm2' as ModuleId, position: 2 }), status: { state: 'abandoned', reason: 'x', followUp: null } }, passed('m3', 3, 371, 331, '9be1c04'.padEnd(40, '0'))],
+  }
+  assert.equal(boardLine(a, now), 'agent 1: Project: search-perf ended: 2 passed, 1 abandoned. p95 latency 415 -> 331 ms. To keep climbing, create a new project from 9be1c04.')
 })
 
 test('leaves the streak out below 2 wins and the numbers out before a baseline', () => {

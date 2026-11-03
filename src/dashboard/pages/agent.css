@@ -241,6 +241,14 @@
   background: var(--danger-soft);
 }
 
+.steps__row[data-state='skipped'] .steps__ring {
+  border-style: dashed;
+}
+
+.steps__row[data-state='skipped'] .steps__title {
+  color: var(--text-faint);
+}
+
 .steps__title {
   grid-area: title;
   font-size: 13px;

@@ -27,10 +27,10 @@ Every board line has this format:
 agent {id}: Project: {title}, Module ({position} / {total}): {title}, Progress: {done steps} / {total steps}, Blurb: {blurb}
 ```
 
-The agent writes one sentence about what it is working on. The server appends the rest of the blurb from its own records: the goal and its metric, the streak when there is one, and the time left. So the blurb always matches what the server has measured.
+The agent writes one sentence about what it is working on. The server appends the rest of the blurb from its own records: the goal and its metric, the best value once a win has moved it, the streak when there is one, a warning when the current module is the project's last, and the time left. So the blurb always matches what the server has measured. Once the project ends, the line sums it up instead: how many modules passed and were abandoned, the metric from the first baseline to the final best, and the commit a new project would start from.
 
 ```
-agent 1: Project: search-perf, Module (2 / 5): query cache, Progress: 3 / 7, Blurb: Caching parsed queries. Goal: p95 latency 371 -> 334 ms, 10% lower. 2 wins in a row. 38 min left.
+agent 1: Project: search-perf, Module (2 / 5): query cache, Progress: 3 / 7, Blurb: Caching parsed queries. Goal: p95 latency 371 -> 334 ms, 10% lower. Best so far 352 ms. 2 wins in a row. 38 min left.
 ```
 
 `whip-server` also serves the dashboard, a web page with one tile per agent. A tile shows everything in the board line, plus a time-left bar, the next queued project, the module's verifiers, open verifier change requests, and flags. Your actions, such as approving a verifier change, happen on the dashboard.
@@ -166,10 +166,11 @@ Agent calls carry the agent ID in the path and the agent token. Runner calls car
 | `POST /agents/{id}/modules/{m}/verifiers/changes` | agent | Files a change request for a module's frozen verifiers |
 | `GET /agents/{id}/modules/{m}/verifiers/changes/{change}` | agent | Returns a change request's state |
 | `POST /agents/{id}/modules/{m}/attempts` | agent | Queues an attempt from its `attemptId`, `commit`, and `note` |
-| `GET /agents/{id}/modules/{m}/attempts/{attemptId}` | agent | Returns the attempt's job state, and once it is judged, its verdict, the step's failed turns, the streak, and the module's state |
+| `GET /agents/{id}/modules/{m}/attempts/{attemptId}` | agent | Returns the attempt's job state, and once it is judged, its verdict with the runner's medians, gain, p and test counts, a sentence on why, the step's failed turns, the streak, and the module's state |
+| `GET /agents/{id}/modules/{m}/steps/{n}` | agent | Returns whether the step is done or skipped, and what its latest step check found |
 | `POST /agents/{id}/modules/{m}/steps/{n}/done` | agent | Queues a step check for the current step, and marks it done when the check passes |
 | `POST /agents/{id}/modules/{m}/abandon` | agent | Records the abandon reason for a pending, active, or stuck module. If the module has a win, it also takes the follow-up module |
-| `GET /agents/{id}` | agent | Returns the agent's board line |
+| `GET /agents/{id}` | agent | Returns the agent's board line, or `no open project` before its first one |
 | `GET /board` | agent or admin | Returns every agent's board line as plain text |
 | `GET /` | admin | Serves the dashboard. A browser sends the admin token as the password, and any page load (`Accept: text/html`) gets the dashboard, so `/agents/1` is a page in a browser and the board line for `curl` |
 | `GET /api/board`, `GET /api/agents/{id}/modules/{m}/attempts/{a}` | admin | The dashboard's data: the board and an attempt's runs |

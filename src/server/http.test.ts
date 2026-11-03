@@ -103,9 +103,11 @@ test('agents, runners and the admin drive a module through HTTP, and the data su
   const landed = await s.call('POST', `/jobs/${claim.json.job}/results`, { token: 'runner', body: { runner: 'r1', outcome: 'done', tests: { passed: 4, total: 4 }, runs: runs(START, 100), touched: [] } })
   assert.deepEqual(landed.json, { state: 'done' })
 
+  // An agent the server hasn't heard from yet has no project, which isn't an error
+  assert.deepEqual(await s.call('GET', '/agents/9').then((r) => [r.status, r.text]), [200, 'agent 9: no open project\n'])
   const line = await s.call('GET', '/agents/1')
   assert.equal(line.type, 'text/plain; charset=utf-8')
-  assert.equal(line.text, 'agent 1: Project: search-perf, Module (1 / 1): query cache, Progress: 0 / 1, Blurb: Caching parsed queries. Goal: p95 latency 100 -> 90 ms, 10% lower. 90 min left.\n')
+  assert.equal(line.text, 'agent 1: Project: search-perf, Module (1 / 1): query cache, Progress: 0 / 1, Blurb: Caching parsed queries. Goal: p95 latency 100 -> 90 ms, 10% lower. Last module in the project. 90 min left.\n')
 
   tick(5)
   const posted = await s.call('POST', '/agents/1/modules/m1/attempts', { body: { attemptId: 'a1', commit: NEXT, note: 'Cache parsed query trees.' } })
@@ -117,7 +119,10 @@ test('agents, runners and the admin drive a module through HTTP, and the data su
   tick(1)
   await s.call('POST', `/jobs/${job.job}/results`, { token: 'runner', body: { runner: 'r1', outcome: 'done', tests: { passed: 4, total: 4 }, runs: runs(START, 100).flatMap((x, i) => [x, runs(NEXT, 88)[i]]) } })
   const judged = await s.call('GET', '/agents/1/modules/m1/attempts/a1')
-  assert.deepEqual([judged.json.verdict, judged.json.module.state], ['win', 'passed'])
+  assert.deepEqual([judged.json.verdict, judged.json.module.state, judged.json.median, judged.json.bestMedian], ['win', 'passed', 88, 100])
+  assert.match(judged.json.why, /^Win: 12% lower than the best commit/)
+  const step = await s.call('GET', '/agents/1/modules/m1/steps/1')
+  assert.deepEqual([step.json.done, step.json.skipped, step.json.check], [false, true, null])
 
   // The dashboard's JSON and attempt detail, with the admin token
   const board = (await s.call('GET', '/api/board', { token: 'admin' })).json as Board

@@ -32,7 +32,7 @@ test('the hook prints the board line as plain text or as an event’s JSON, and 
     assert.equal(await runHook(env), `${LINE}\n`)
     assert.equal(await runHook(env, 'Post"Tool'), `${LINE}\n`, 'an event name that isn’t letters gets the plain line')
     assert.equal(context(await runHook(env, 'PostToolBatch'), 'PostToolBatch'), LINE.replace('\t', ' '), 'a tab becomes a space')
-    assert.match(context(await runHook({ ...env, WHIP_AGENT_TOKEN: 'wrong' }, 'PostToolUse'), 'PostToolUse'), /didn't answer \(.*401/)
+    assert.match(context(await runHook({ ...env, WHIP_AGENT_TOKEN: 'wrong' }, 'PostToolUse'), 'PostToolUse'), /whip-server answered 401 \(no\)\. Check WHIP_URL/, 'a refusal is told apart from an outage')
   } finally {
     await new Promise<void>((r) => server.close(() => r()))
   }

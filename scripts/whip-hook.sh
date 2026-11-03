@@ -26,9 +26,16 @@ if [ -z "$WHIP_URL" ] || [ -z "$WHIP_AGENT_ID" ] || [ -z "$WHIP_AGENT_TOKEN" ]; 
   say "Agent Whipper: set WHIP_URL, WHIP_AGENT_ID and WHIP_AGENT_TOKEN to see your board line."
   exit 0
 fi
-if line=$(curl -fsS --max-time 5 -H "Authorization: Bearer $WHIP_AGENT_TOKEN" "$WHIP_URL/agents/$WHIP_AGENT_ID" 2>&1); then
-  say "$line"
+# -w appends the status code on its own line, so a refusal can be told from an outage
+if out=$(curl -sS --max-time 5 -w '\n%{http_code}' -H "Authorization: Bearer $WHIP_AGENT_TOKEN" "$WHIP_URL/agents/$WHIP_AGENT_ID" 2>&1); then
+  code=$(printf '%s\n' "$out" | tail -n 1)
+  body=$(printf '%s\n' "$out" | sed '$d')
+  if [ "$code" = 200 ]; then
+    say "$body"
+  else
+    say "Agent Whipper: whip-server answered $code ($(printf '%s' "$body" | head -n 1)). Check WHIP_URL and WHIP_AGENT_TOKEN, and carry on with your current step meanwhile."
+  fi
 else
-  say "Agent Whipper: whip-server didn't answer ($line). Carry on with your current step, and keep your blurb current."
+  say "Agent Whipper: whip-server didn't answer ($(printf '%s\n' "$out" | head -n 1)). Carry on with your current step, and keep your blurb current."
 fi
 exit 0

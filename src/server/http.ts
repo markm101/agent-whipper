@@ -289,6 +289,15 @@ const ROUTES: Route[] = [
     },
   ],
   [
+    'GET',
+    P('/agents/:id/modules/:m/steps/:n'),
+    ['agent'],
+    (s, { params: [agent, module, n] }) => {
+      const status = s.read((w) => view.stepStatusOf(w, agent!, module!, Number(n)))
+      return status ? json(status) : missing(`step ${n} on agent ${agent}'s ${module}`)
+    },
+  ],
+  [
     'POST',
     P('/agents/:id/modules/:m/abandon'),
     ['agent'],
@@ -307,7 +316,8 @@ const ROUTES: Route[] = [
         const a = w.agents.find((x) => x.id === agent)
         return a ? view.agentView(a, now).line : null
       })
-      return line ? { status: 200, text: `${line}\n` } : { status: 404, text: `agent ${agent}: unknown to whip-server\n` }
+      // An agent the server hasn't heard from yet just has no project, which isn't an error
+      return { status: 200, text: `${line ?? `agent ${agent}: no open project`}\n` }
     },
   ],
   ['GET', P('/board'), ['agent', 'admin'], (s) => ({ status: 200, text: `${s.read((w, now) => view.boardText(w, now))}\n` })],

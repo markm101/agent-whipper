@@ -68,8 +68,9 @@ Agent calls take the agent token, runner calls the runner token, and dashboard a
 | `POST /agents/{id}/modules/{m}/verifiers/changes` | agent | Files a change request |
 | `GET /agents/{id}/modules/{m}/verifiers/changes/{change}` | agent | Reads a change request |
 | `POST /agents/{id}/modules/{m}/attempts` | agent | Queues an attempt |
-| `GET /agents/{id}/modules/{m}/attempts/{attemptId}` | agent | Reads an attempt's job, verdict, failed turns, streak, and module state |
+| `GET /agents/{id}/modules/{m}/attempts/{attemptId}` | agent | Reads an attempt's job, verdict with its numbers and why, failed turns, streak, and module state |
 | `POST /agents/{id}/modules/{m}/steps/{n}/done` | agent | Queues a step check |
+| `GET /agents/{id}/modules/{m}/steps/{n}` | agent | Reads a step and what its latest check found |
 | `POST /agents/{id}/modules/{m}/abandon` | agent | Abandons a module, with a follow-up if it has a win |
 | `GET /agents/{id}` | agent | The agent's board line, as plain text |
 | `GET /board` | agent or admin | Every board line |

@@ -5,7 +5,10 @@ import { Icon, StateBadge } from './parts.tsx'
 
 function facts(m: Module): string[] {
   const g = m.goal
-  const out = [plural(m.steps.length, 'step'), `${g.metric}, ${setPercent(g.targetGain)} ${g.direction}`]
+  // A module that passed or was abandoned early skipped its remaining steps
+  const ended = m.status.state === 'passed' || m.status.state === 'abandoned'
+  const skipped = ended ? m.steps.filter((x) => !x.done).length : 0
+  const out = [`${plural(m.steps.length, 'step')}${skipped ? `, ${skipped} skipped` : ''}`, `${g.metric}, ${setPercent(g.targetGain)} ${g.direction}`]
   if (g.baseline !== null) out.push(`baseline ${withUnit(g.baseline, g.unit)}`)
   if (g.target !== null) out.push(`target ${withUnit(g.target, g.unit)}`)
   return out
