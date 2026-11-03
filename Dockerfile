@@ -27,6 +27,8 @@ FROM docker:29-cli AS docker-cli
 
 FROM node:26-slim AS runner
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates openssh-client && rm -rf /var/lib/apt/lists/*
+# Bare repos mounted at /repos belong to a host user, not the runner's root
+RUN git config --system --add safe.directory '/repos/*'
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 WORKDIR /app
 ENV WHIP_WORK=/work
