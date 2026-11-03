@@ -40,7 +40,7 @@ agent 1: Project: search-perf, Module (2 / 5): query cache, Progress: 3 / 7, Blu
 | Record | Fields |
 |---|---|
 | Agent | `id`, open project, queued projects, blurb sentence |
-| Project | `title` (unique per agent), start commit, ordered modules, `maxMinutes` (optional) |
+| Project | `title` (unique per agent), start commit, git remote (optional), ordered modules, `maxMinutes` (optional) |
 | Module | `id` (never changes), position, `title` (unique in its project), ordered steps, goal, verifiers, state, start commit, head commit, best commit, attempts, `startedAt`, `maxMinutes` (optional), stuck cause (`step`, `target`, or `time`), `abandonReason`, `retryOf` (the module it retries, if any) |
 | Step | `title`, `done`, failed turns |
 | Goal | `metric`, `direction` (`lower` or `higher`), `targetGain` (percent of the baseline), `minGain` (percent of the best commit's median), `ambitious` |
@@ -59,7 +59,7 @@ Each agent has one open project at a time. A project sent while another is open 
 
 New work that belongs to the open project becomes a module instead of a project. So does another approach to a goal. A new module comes with its own steps and goal, goes right after the current module, and needs verifiers before it can start.
 
-Calls name a module by its ID, which never changes. The board line shows its position, which shifts when a module is inserted.
+Calls name a module by its ID, which never changes. The server gives each module an ID when its project opens, `m1`, `m2`, and so on across all of an agent's projects. The board line shows its position, which shifts when a module is inserted.
 
 ## Module lifecycle
 
@@ -91,19 +91,20 @@ The agent never reports a number. For each attempt it commits its change on top 
 - **Frozen copies.** The runner fetches the best commit and the new commit and copies the frozen verifier files over each checkout. Edits the agent made to tests or the benchmark have no effect.
 - **Attempts.** On the new commit, the runner runs the regression tests and the tests of every step that is done. Then it runs the benchmark 5 times on each commit, alternating. It sends each run's commit, value, and work count, the test results and test count, and which verifier files the commit touched.
 - **Step checks.** Marking the current step done queues a step check, which is allowed while the module is active or past target. The runner runs that step's tests and the regression tests on the head commit, and the step is done only when they pass. It also runs the benchmark 5 times on the head commit and the best commit, alternating, so the server can tell whether the finished step held the metric.
-- **Any workload.** The runner knows nothing about the workload. A benchmark is any command that prints each run's value and work count as one JSON line, such as `{"value": 331, "work": 12000}`. A hardware label such as `gpu` sends a job to a runner that has that hardware, and the runner passes it into the job container.
+- **Any workload.** The runner knows nothing about the workload. A benchmark is any command that prints each run's value and work count as one JSON line, such as `{"value": 331, "work": 12000}`. A test command passes when it exits 0, and it can report counts as a last line such as `{"passed": 40, "total": 42}`; without one it counts as one test. A hardware label such as `gpu` sends a job to a runner that has that hardware, and the runner passes it into the job container.
+- **Fetching commits.** The runner fetches commits from the project's git remote, or its own default. A commit it can't fetch fails the job the same way failing tests do, and so does a benchmark that crashes on the commit under test.
 - **Baselines.** Before a module becomes active, a baseline job runs the regression tests and the benchmark 5 times on the module's start commit. The median is the baseline, and the target is the baseline improved by `targetGain`. If the baseline job fails or is killed, the module stays pending until its verifiers change or the agent abandons it, and the dashboard flags it.
 - **Tokens.** Agents, runners, and you hold different tokens. Only a runner token can send results, and only the admin token can approve changes or replace verifiers.
 - **Bare containers.** A job container gets its checkout and nothing else: no tokens, no Docker socket, and no network.
 - **Leases and time limits.** The runner holding a job renews its lease while the job runs. If the lease lapses, the runner is presumed gone and the job returns to the queue for any runner to claim. A job that runs past its time limit is killed.
-- **Repeat runs.** A job is identified by its kind, its commits, its step, and the verifier hash, so running it twice returns the same stored result.
+- **Repeat runs.** A job is identified by its kind, its commits, its step, and the verifier hash, so running it twice returns the same stored result. Reposting a commit as a new attempt gets the stored verdict instead of another roll of the dice. Only a job the runner couldn't run at all is run again.
 
 ## The server judges every attempt
 
 The server sets each attempt's verdict from the runner's results.
 
 - A win passes the tests, its median beats the best commit's median by at least `minGain`, and a rank test (Mann-Whitney) separates the two sets of runs at p below 0.05.
-- A fail has failing tests, a job killed for running past its time limit, or runs that the rank test shows are worse than the best commit's at p below 0.05.
+- A fail has failing tests, a job killed for running past its time limit, a commit the runner can't fetch or benchmark, or runs that the rank test shows are worse than the best commit's at p below 0.05.
 - Any other attempt is flat.
 - A win moves both the head commit and the best commit to the new commit. A flat attempt moves only the head commit, so work that prepares later steps is kept. A fail moves neither, and the agent goes back to the head commit.
 - An attempt meets the target when it is a win and its median reaches the target.
@@ -117,7 +118,7 @@ Each module gets `maxMinutes` of wall-clock time from when it becomes active. Th
 
 - The deadline is the start time plus `maxMinutes`, plus any extensions, plus the time the module's jobs spent waiting for a runner after it became active. Only one job is in flight at a time, so waits never overlap.
 - No timer runs. On every request, the server recomputes the deadline and applies any transition that has come due, such as running out of time. Nothing has to survive a restart.
-- Once the deadline passes, the module accepts no step checks and gets one last attempt. If an attempt is in flight at the deadline, it is the last attempt. Otherwise the module accepts one last attempt during a grace period that starts at the deadline and lasts 10% of its `maxMinutes`, 9 minutes for a 90-minute module. A step check in flight at the deadline still finishes.
+- Once the deadline passes, the module accepts no step checks and gets one last attempt. If an attempt is in flight at the deadline, it is the last attempt. Otherwise the module accepts one last attempt during a grace period that starts at the deadline and lasts 10% of its `maxMinutes`, 9 minutes for a 90-minute module. A step check in flight at the deadline still finishes, and the module doesn't run out of time until it has.
 - The module runs out of time when its last attempt has been judged, or when the grace period ends without one. If the last attempt is a win that earns an extension moving the deadline past the present, the module carries on instead.
 - Running out of time makes an active module stuck with cause `time`, and makes a past-target module pass.
 - The time limit catches a module whose attempts stay flat, and an agent that stops posting attempts. Neither one fails a step, so the step rule alone never stops them.
@@ -170,9 +171,11 @@ Agent calls carry the agent ID in the path and the agent token. Runner calls car
 | `POST /agents/{id}/modules/{m}/abandon` | agent | Records the abandon reason for a pending, active, or stuck module. If the module has a win, it also takes the follow-up module |
 | `GET /agents/{id}` | agent | Returns the agent's board line |
 | `GET /board` | agent or admin | Returns every agent's board line as plain text |
-| `GET /` | admin | Serves the dashboard |
+| `GET /` | admin | Serves the dashboard. A browser sends the admin token as the password, and any page load (`Accept: text/html`) gets the dashboard, so `/agents/1` is a page in a browser and the board line for `curl` |
+| `GET /api/board`, `GET /api/agents/{id}/modules/{m}/attempts/{a}` | admin | The dashboard's data: the board and an attempt's runs |
 | `POST /admin/changes/{change}` | admin | Approves or rejects a change request |
 | `PUT /admin/agents/{id}/modules/{m}/verifiers` | admin | Replaces a module's verifiers |
+| `GET /admin/verifiers/{hash}` | admin | Returns a frozen verifier set's files, for reviewing a change request |
 | `POST /jobs/claim` | runner | Claims the next job whose hardware label the runner has |
 | `POST /jobs/{job}/lease` | runner | Renews the lease on a job the runner holds |
 | `POST /jobs/{job}/results` | runner | Sends a job's runs, test results, and the verifier files its commit touched |

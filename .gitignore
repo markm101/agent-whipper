@@ -2,3 +2,8 @@ node_modules/
 dist/
 shots/
 .deploy/
+.env
+*.db
+*.db-shm
+*.db-wal
+repos/

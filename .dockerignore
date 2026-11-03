@@ -1,0 +1,10 @@
+.git
+.deploy
+node_modules
+dist
+shots
+docs/overview/node_modules
+docs/overview/.deploy
+*.db
+*.db-*
+.env

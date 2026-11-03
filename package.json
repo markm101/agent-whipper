@@ -8,6 +8,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:demo": "VITE_DATA=mock vite build",
+    "server": "node src/server/main.ts",
+    "runner": "node src/runner/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --test 'src/**/*.test.ts'",
     "shoot": "node scripts/shoot.mjs"
