@@ -27,7 +27,7 @@ Every board line has this format:
 agent {id}: Project: {title}, Module ({position} / {total}): {title}, Progress: {done steps} / {total steps}, Blurb: {blurb}
 ```
 
-The agent writes one sentence about what it is working on. The server appends the rest of the blurb from its own records: the goal and its metric, the best value once a win has moved it, the streak when there is one, a warning when the current module is the project's last, and the time left. So the blurb always matches what the server has measured. Once the project ends, the line sums it up instead: how many modules passed and were abandoned, the metric's change over the project, and the commit a new project would start from. The change chains each module's gain on its own benchmark, so a benchmark changed partway can't skew it. Values under 100 show three significant figures, so small numbers still show progress.
+The agent writes one sentence about what it is working on. The server appends the rest of the blurb from its own records: the goal and its metric, the best value once a win has moved it, the streak when there is one, a warning when the current module is the project's last, and the time left. So the blurb always matches what the server has measured. Once the project ends, the line sums it up instead: how many modules passed and were abandoned, the metric's change over the project, and the commit a new project would start from. A final job measures that change: it runs the benchmark on the project's start commit and its final commit, alternating, on the last module's verifiers. Until it lands, the line gives an estimate that chains each module's gain. Values under 100 show three significant figures, so small numbers still show progress.
 
 ```
 agent 1: Project: search-perf, Module (2 / 5): query cache, Progress: 3 / 7, Blurb: Caching parsed queries. Goal: p95 latency 371 -> 334 ms, 10% lower. Best so far 352 ms. 2 wins in a row. 38 min left.
@@ -47,7 +47,7 @@ agent 1: Project: search-perf, Module (2 / 5): query cache, Progress: 3 / 7, Blu
 | Verifiers | frozen files, verifier hash, container image, test commands for each step and for regressions, benchmark command (prints one JSON line per run), hardware label, job time limit, author |
 | Change request | `id`, module, author, reason, proposed files, state (`open`, `approved`, or `rejected`) |
 | Attempt | `attemptId` (chosen by the agent), module, step, `commit`, `note`, job, `verdict` (`win`, `flat`, or `fail`), posted and judged times |
-| Job | `id` (from its kind, commits, step, and verifier hash), module, kind (`baseline`, `attempt`, or `step check`), state, verifier hash, hardware label, holding runner, lease expiry, queued, claimed, and finished times for each claim, each benchmark run's commit, value, and work count, test results and test count, verifier files the commit touched |
+| Job | `id` (from its kind, commits, step, and verifier hash), module, kind (`baseline`, `attempt`, `step check`, or `final`), state, verifier hash, hardware label, holding runner, lease expiry, queued, claimed, and finished times for each claim, each benchmark run's commit, value, and work count, test results and test count, verifier files the commit touched |
 
 The server derives the baseline, the best value, the streak, the extensions, and the deadline from the attempts and jobs instead of storing them, so they can't drift out of step. It stores each module's state, and on every request it applies any transition that has come due.
 
@@ -57,7 +57,7 @@ An agent starts by creating a project with its start commit and its modules, eac
 
 Each agent has one open project at a time. A project sent while another is open joins the agent's queue and starts when the open project ends. A project ends when every module in it has passed or been abandoned.
 
-New work that belongs to the open project becomes a module instead of a project. So does another approach to a goal. A new module comes with its own steps and goal, goes right after the current module, and needs verifiers before it can start.
+New work that belongs to the open project becomes a module instead of a project. So does another approach to a goal. A new module comes with its own steps and goal, goes right after the current module, behind any modules added earlier that haven't started, and needs verifiers before it can start. The answer gives its position.
 
 Calls name a module by its ID, which never changes. The server gives each module an ID when its project opens, `m1`, `m2`, and so on across all of an agent's projects. The board line shows its position, which shifts when a module is inserted.
 
@@ -72,7 +72,7 @@ A module is `pending`, `active`, `pastTarget`, `stuck`, `passed`, or `abandoned`
 5. A stuck module becomes abandoned when the agent records `abandonReason`. The reason is one sentence that names the assumption the attempts shared. The agent can also abandon a pending or active module early. Abandoning cancels any job in flight, and a result that arrives later changes nothing.
 6. A module abandoned with a win keeps it. The abandon call then has to propose a follow-up module that starts from the abandoned module's best commit. The follow-up either retries the same steps with a smaller `targetGain`, or adds new steps built on that commit. A module can be retried only once, so a retry can only be built on. The follow-up goes right after the current module, starts with every step undone, and needs its own verifiers and baseline.
 7. A module abandoned without a win has nothing worth keeping, so its commits are dropped.
-8. Each module starts from the commit the module before it left behind: the head commit of a module that passed, the best commit of a module abandoned with a win, or the start commit of a module abandoned without one. The first module starts from the project's start commit.
+8. Each module starts from the commit the module before it left behind: the best commit of a module that passed or was abandoned with a win, or the start commit of a module abandoned without one. A passed module's flat attempts after its last win stay behind, since the steps they prepared won't run, and a module abandoned without a win drops its flat commits too. The first module starts from the project's start commit. The abandon call and the waiting module's board line name the commit, so the agent can reset its branch to it.
 
 ## Verifiers come first
 
@@ -91,7 +91,7 @@ Every module needs verifiers before it can start: tests that prove each step wor
 The agent never reports a number. For each attempt it commits its change on top of the head commit, pushes the commit where the runner can fetch it, and posts the attempt's ID, commit, and a note. Each module has at most one job in flight, and the server refuses a new attempt or step check while one is queued or running.
 
 - **Frozen copies.** The runner fetches the best commit and the new commit and copies the frozen verifier files over each checkout. Edits the agent made to tests or the benchmark have no effect.
-- **Attempts.** On the new commit, the runner runs the regression tests and the tests of every step that is done. Then it runs the benchmark 5 times on each commit, alternating. It sends each run's commit, value, and work count, the test results and test count, and which verifier files the commit touched.
+- **Attempts.** On the new commit, the runner runs the regression tests and the tests of every step that is done. Then it runs the benchmark 5 times on each commit, alternating. A module's verifiers can ask for more runs, up to 25, when its benchmark is noisy, since 5 runs a side can only confirm a gain when the two sets barely overlap. It sends each run's commit, value, and work count, the test results and test count, and which verifier files the commit touched.
 - **Step checks.** Marking the current step done queues a step check, which is allowed while the module is active or past target. The runner runs that step's tests and the regression tests on the head commit, and the step is done only when they pass. It also runs the benchmark 5 times on the head commit and the best commit, alternating, so the server can tell whether the finished step held the metric.
 - **Any workload.** The runner knows nothing about the workload. A benchmark is any command that prints each run's value and work count as one JSON line, such as `{"value": 331, "work": 12000}`. Values must be positive, because gains are percentages of them. A test command passes when it exits 0, and it can report counts as a last line such as `{"passed": 40, "total": 42}`; without one it counts as one test. A hardware label such as `gpu` sends a job to a runner that has that hardware, and the runner passes it into the job container.
 - **Fetching commits.** The runner fetches commits from the project's git remote, or its own default. Commits are named by their full hash, so one commit can't pass as two. A commit it can't fetch fails the job the same way failing tests do, and so does a benchmark that crashes on the commit under test. The frozen files are written without following any symlink the commit contains, so a link can't carry them out of the checkout.
@@ -173,7 +173,7 @@ Agent calls carry the agent ID in the path and the agent token. Runner calls car
 | `GET /agents/{id}/modules/{m}/attempts/{attemptId}` | agent | Returns the attempt's job state, and once it is judged, its verdict with the runner's medians, gain, p and test counts, a sentence on why, the step's failed turns, the streak, and the module's state |
 | `GET /agents/{id}/modules/{m}/steps/{n}` | agent | Returns whether the step is done or skipped, and what its latest step check found |
 | `POST /agents/{id}/modules/{m}/steps/{n}/done` | agent | Queues a step check for the current step, and marks it done when the check passes |
-| `POST /agents/{id}/modules/{m}/abandon` | agent | Records the abandon reason for a pending, active, or stuck module. If the module has a win, it also takes the follow-up module |
+| `POST /agents/{id}/modules/{m}/abandon` | agent | Records the abandon reason for a pending, active, or stuck module. If the module has a win, it also takes the follow-up module. Returns the commit the next module starts from |
 | `GET /agents/{id}` | agent | Returns the agent's board line, or `no open project` before its first one |
 | `GET /board` | agent or admin | Returns every agent's board line as plain text |
 | `GET /` | admin | Serves the dashboard. A browser sends the admin token as the password, and any page load (`Accept: text/html`) gets the dashboard, so `/agents/1` is a page in a browser and the board line for `curl` |
@@ -209,5 +209,5 @@ A Claude Code or Codex hook calls `GET /agents/{id}` and adds the board line to 
 
 These two are facts to measure, not choices to make.
 
-- Are 5 runs per commit enough to separate real gains from noise? This needs measuring on real benchmarks.
+- How many runs per commit do real benchmarks need? In three demo runs, the same commit drifted about ±5% between jobs, and with 5 runs a side, real gains under about 6% came out flat. Verifiers can now ask for more runs; what default real benchmarks need is still to measure.
 - Does the board line come back soon enough after the agent's context is compacted? The hook tests never ran long enough to compact. The next round of tool calls adds the line again, but the request right after compaction may go without it.

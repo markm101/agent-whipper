@@ -6,6 +6,7 @@ import type { AgentId, AttemptId, ChangeId, Commit, FlagKind, Iso, JobId, JobSta
 import { holds, judge, reaches } from './judge.ts'
 import {
   agentOf,
+  endCommit,
   baselineJob,
   inFlight,
   latestBaseline,
@@ -84,6 +85,7 @@ const normalVerifiers = (v: VerifierSpec): VerifierSpec => ({
   commands: { regression: v.commands.regression, steps: [...v.commands.steps], benchmark: v.commands.benchmark },
   hardware: v.hardware,
   timeLimitMinutes: v.timeLimitMinutes,
+  ...(v.runs === undefined ? {} : { runs: v.runs }),
 })
 
 const keyOf = (s: ModuleSpec | ProjectSpec) => JSON.stringify(s)
@@ -179,6 +181,7 @@ function expire(m: ModuleRec, j: JobRec, now: Ms) {
 
 /** Opens the next queued project once the open one ends, and queues the baseline of the module whose turn it is. */
 function advance(w: World, a: AgentRec, at: Ms, config: Config) {
+  if (a.project && projectEnded(a.project)) measureProject(w, a, a.project, at)
   if (a.project && projectEnded(a.project) && a.queued.length) open(a, a.queued.shift()!, at, config)
   const p = a.project
   if (!p) return
@@ -193,6 +196,20 @@ function advance(w: World, a: AgentRec, at: Ms, config: Config) {
   if (m.jobs.some((j) => j.kind === 'baseline' && (j.state === 'queued' || j.state === 'running'))) return
   if (m.jobs.some((j) => j.key === key && j.state !== 'cancelled')) return
   queue(w, a, m, 'baseline', { step: null, commit: start, bestCommit: null, stepTests: [] }, at)
+}
+
+/**
+ * An ended project measures its start commit against the commit it left
+ * behind, in one job on its last module's verifiers, so its result isn't
+ * pieced together from modules measured in different jobs.
+ */
+function measureProject(w: World, a: AgentRec, p: ProjectRec, at: Ms) {
+  const host = p.modules.findLast((m) => baselineJob(m) !== null)
+  const end = endCommit(p)
+  const v = host && verifiersOf(host)
+  if (!host || !v || !end || end === p.startCommit) return
+  if (host.jobs.some((j) => j.kind === 'final' && j.state !== 'cancelled')) return
+  queue(w, a, host, 'final', { step: null, commit: end, bestCommit: p.startCommit, stepTests: [] }, at)
 }
 
 /**
@@ -298,6 +315,8 @@ function checkStep(m: ModuleRec, j: JobRec, at: Ms, fresh: boolean) {
 }
 
 function apply(p: ProjectRec, m: ModuleRec, j: JobRec, at: Ms, fresh: boolean) {
+  // A project's final measurement only feeds the summary, which is derived
+  if (j.kind === 'final') return
   if (j.kind === 'baseline') return landBaseline(m, j, at)
   if (j.kind === 'stepCheck') return checkStep(m, j, at, fresh)
   const x = m.attempts.findLast((y) => y.job === j.id && y.judged === null)
@@ -353,7 +372,7 @@ export function setBlurb(w: World, at: Ms, args: { agent: string; blurb: string 
   return ok(null)
 }
 
-export function addModule(w: World, at: Ms, args: { agent: string; spec: ModuleSpec }, config: Config = DEFAULTS): Result<{ module: ModuleId }> {
+export function addModule(w: World, at: Ms, args: { agent: string; spec: ModuleSpec }, config: Config = DEFAULTS): Result<{ module: ModuleId; position: number }> {
   settle(w, at, config)
   const a = agentOf(w, args.agent)
   if (!a) return notFound('noAgent', `There is no agent ${args.agent}.`)
@@ -364,11 +383,15 @@ export function addModule(w: World, at: Ms, args: { agent: string; spec: ModuleS
   if (args.spec.retryOf !== undefined) return invalid('badSpec', 'Only an abandon follow-up can retry a module.')
   const spec = normalModule(args.spec)
   const same = p.modules.find((m) => m.title === spec.title)
-  if (same) return same.specKey === keyOf(spec) ? ok({ module: same.id }) : conflict('titleTaken', `Project "${p.title}" already has a module titled "${spec.title}".`)
+  if (same) return same.specKey === keyOf(spec) ? ok({ module: same.id, position: p.modules.indexOf(same) + 1 }) : conflict('titleTaken', `Project "${p.title}" already has a module titled "${spec.title}".`)
   const m = moduleFrom(a, spec, p.maxMinutes, config)
-  p.modules.splice(p.modules.indexOf(currentOf(p)!) + 1, 0, m)
+  m.added = true
+  // Right after the current module, behind any modules added before it that haven't started
+  let i = p.modules.indexOf(currentOf(p)!) + 1
+  while (p.modules[i]?.added && p.modules[i]!.state === 'pending') i++
+  p.modules.splice(i, 0, m)
   advance(w, a, at, config)
-  return ok({ module: m.id })
+  return ok({ module: m.id, position: i + 1 })
 }
 
 export function freezeVerifiers(w: World, at: Ms, args: { agent: string; module: string; author: string; verifiers: VerifierSpec }, config: Config = DEFAULTS): Result<{ hash: string }> {
@@ -476,12 +499,14 @@ export function abandon(
   at: Ms,
   args: { agent: string; module: string; reason: string; followUp?: ModuleSpec },
   config: Config = DEFAULTS,
-): Result<{ followUp: ModuleId | null }> {
+): Result<{ followUp: ModuleId | null; startsFrom: Commit | null }> {
   settle(w, at, config)
   const found = find(w, args.agent, args.module)
   if (!found.ok) return found
   const { a, p, m } = found.value
-  if (m.state === 'abandoned') return ok({ followUp: m.followUp })
+  // The commit the module after this one starts from, so the agent can reset its branch to it
+  const startsFrom = () => startCommits(p)[p.modules.indexOf(m) + 1] ?? endCommit(p)
+  if (m.state === 'abandoned') return ok({ followUp: m.followUp, startsFrom: startsFrom() })
   if (!takes('abandon', m.state)) return conflict('wrongState', `${m.id} is ${m.state}, and only a pending, active, or stuck module can be abandoned.`)
   if (!isText(args.reason, 300)) return invalid('badSpec', 'The abandon reason is one sentence of at most 300 characters, naming the assumption the attempts shared.')
   const won = lastWin(m) !== null
@@ -510,7 +535,7 @@ export function abandon(
   }
   move(m, 'abandoned', at)
   advance(w, a, at, config)
-  return ok({ followUp: m.followUp })
+  return ok({ followUp: m.followUp, startsFrom: startsFrom() })
 }
 
 // Admin calls
@@ -624,7 +649,9 @@ export function claimJob(w: World, at: Ms, args: { runner: string; labels: strin
   if (!isText(args.runner, 60)) return invalid('badSpec', 'A runner needs a name.')
   if (!Array.isArray(args.labels) || args.labels.length === 0 || !args.labels.every((l) => isText(l, 40))) return invalid('badSpec', 'A runner needs its hardware labels, such as cpu.')
   // The oldest queued job whose hardware the runner has
-  const queued = w.agents.flatMap((a) => (a.project?.modules ?? []).flatMap((m) => m.jobs.filter((j) => j.state === 'queued').map((j) => ({ a, m, j }))))
+  // Ended projects too, for their final measurement
+  const projects = (a: AgentRec) => (a.project ? [a.project, ...a.past] : a.past)
+  const queued = w.agents.flatMap((a) => projects(a).flatMap((p) => p.modules.flatMap((m) => m.jobs.filter((j) => j.state === 'queued').map((j) => ({ a, m, j })))))
   const pick = queued
     .filter(({ m, j }) => args.labels.includes(verifierSet(m, j.verifierHash)!.hardware))
     .sort((x, y) => x.j.queuedAt - y.j.queuedAt || Number(x.j.id.slice(1)) - Number(y.j.id.slice(1)))[0]
@@ -648,9 +675,9 @@ export function claimJob(w: World, at: Ms, args: { runner: string; labels: strin
     image: v.image,
     hardware: v.hardware,
     timeLimitMinutes: v.timeLimitMinutes,
-    tests: [v.commands.regression, ...j.stepTests.map((n) => v.commands.steps[n - 1]!)],
+    tests: j.kind === 'final' ? [] : [v.commands.regression, ...j.stepTests.map((n) => v.commands.steps[n - 1]!)],
     benchmark: v.commands.benchmark,
-    runs: config.runs,
+    runs: v.runs ?? config.runs,
     leaseUntil: iso(leaseUntil),
   })
 }
@@ -667,7 +694,7 @@ export function renewLease(w: World, at: Ms, args: { job: string; runner: string
   return ok({ state: j.state, leaseUntil: iso(claim.leaseUntil) })
 }
 
-function resultsProblem(r: JobResults | undefined, j: JobRec, config: Config): string | null {
+function resultsProblem(r: JobResults | undefined, j: JobRec, runs: number): string | null {
   if (!r || typeof r !== 'object') return 'Results must be an object.'
   if (!['done', 'killed', 'badCommit', 'error'].includes(r.outcome)) return 'outcome must be done, killed, badCommit, or error.'
   const t = r.tests ?? null
@@ -683,7 +710,7 @@ function resultsProblem(r: JobResults | undefined, j: JobRec, config: Config): s
   // Exactly the runs asked for on each commit, or none for a commit the benchmark couldn't measure
   for (const c of commits) {
     const n = r.runs.filter((run) => run.commit.toLowerCase() === c).length
-    if (n !== 0 && n !== config.runs) return `Send ${config.runs} runs on ${c}, or none if its benchmark failed; got ${n}.`
+    if (n !== 0 && n !== runs) return `Send ${runs} runs on ${c}, or none if its benchmark failed; got ${n}.`
   }
   if (!Array.isArray(r.touched) || r.touched.length > 1000 || !r.touched.every((x) => typeof x === 'string')) return 'touched must be a list of file paths.'
   return null
@@ -698,7 +725,7 @@ export function sendResults(w: World, at: Ms, args: { job: string; runner: strin
   if (j.state === 'done' || j.state === 'killed' || j.state === 'failed' || j.state === 'cancelled') return ok({ state: j.state })
   const claim = j.claims.at(-1)
   if (j.state !== 'running' || !claim || claim.runner !== args.runner || claim.endedAt !== null) return conflict('notYourJob', `${args.runner} doesn't hold ${j.id}. Its lease lapsed, or another runner holds it.`)
-  const problem = resultsProblem(args.results, j, config)
+  const problem = resultsProblem(args.results, j, verifierSet(m, j.verifierHash)?.runs ?? config.runs)
   if (problem) return invalid('badResults', problem)
 
   const r = args.results

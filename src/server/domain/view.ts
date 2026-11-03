@@ -1,7 +1,8 @@
 // What the server sends: the records turned into the Board and AttemptDetail
 // of src/shared/api.ts, the plain-text board lines, and the small answers to
 // an agent's GET calls. Read-only; settle the world first.
-import type { Agent, AgentId, Attempt, AttemptDetail, AttemptId, Board, ChangeId, Clock, Iso, JobId, Module, ModuleId, ModuleStatus, Verdict } from '../../shared/api.ts'
+import type { Agent, AgentId, Attempt, AttemptDetail, AttemptId, Board, ChangeId, Clock, Commit, Iso, JobId, Module, ModuleId, ModuleStatus, ProjectResult, Verdict } from '../../shared/api.ts'
+import { judge } from './judge.ts'
 import { boardLine } from '../../shared/boardLine.ts'
 import { currentOf, factsOf, failedTurns, firstInLine, locate, measured, verifiersOf, type Facts } from './queries.ts'
 import { MINUTE, iso, type AgentRec, type AttemptRec, type JobRec, type ModuleRec, type Ms, type ProjectRec, type VerifierSet, type World } from './records.ts'
@@ -62,7 +63,7 @@ function clockOf(m: ModuleRec, f: Facts, now: Ms): Clock {
 function moduleOf(p: ProjectRec, m: ModuleRec, now: Ms): Module {
   const f = factsOf(p, m, now)
   const v = verifiersOf(m)
-  const tests = m.jobs.findLast((j) => j.results?.tests)?.results?.tests?.total ?? null
+  const tests = m.jobs.findLast((j) => j.kind !== 'final' && j.results?.tests)?.results?.tests?.total ?? null
   return {
     id: m.id,
     position: p.modules.indexOf(m) + 1,
@@ -93,9 +94,22 @@ function moduleOf(p: ProjectRec, m: ModuleRec, now: Ms): Module {
   }
 }
 
+/** The project's final measurement, once it has ended. */
+function finalOf(p: ProjectRec): ProjectResult | undefined {
+  const host = p.modules.find((m) => m.jobs.some((j) => j.kind === 'final'))
+  const j = host?.jobs.findLast((x) => x.kind === 'final')
+  if (!host || !j || j.state === 'cancelled') return undefined
+  if (j.state === 'queued' || j.state === 'running') return { state: 'measuring' }
+  const values = (c: Commit | null) => (j.results?.runs ?? []).filter((r) => r.commit === c).map((r) => r.value)
+  const r = judge({ tests: j.results?.tests ?? null, killed: j.state !== 'done', best: values(j.bestCommit), next: values(j.commit) }, { direction: host.goal.direction, minGain: 0 })
+  if (r.median === null || r.bestMedian === null || r.gain === null || r.p === null) return { state: 'failed' }
+  return { state: 'done', metric: host.goal.metric, unit: host.goal.unit, direction: host.goal.direction, from: r.bestMedian, to: r.median, gain: r.gain, p: r.p }
+}
+
 export function agentView(a: AgentRec, now: Ms): Agent {
   const p = a.project
-  const project = p && { title: p.title, modules: p.modules.map((m) => moduleOf(p, m, now)), current: currentOf(p)?.id ?? null }
+  const final = p && finalOf(p)
+  const project = p && { title: p.title, modules: p.modules.map((m) => moduleOf(p, m, now)), current: currentOf(p)?.id ?? null, ...(final ? { final } : {}) }
   const agent: Agent = { id: a.id, blurb: a.blurb, line: '', project, queued: a.queued.map((q) => q.title) }
   return { ...agent, line: boardLine(agent, new Date(now)) }
 }

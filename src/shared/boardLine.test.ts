@@ -65,7 +65,7 @@ test('warns while the current module is the last one, so the agent can add anoth
 
 test('an ended project sums up what it did and where to start the next one', () => {
   const passed = (id: string, position: number, baseline: number, best: number, head: string) =>
-    moduleWith({ id: id as ModuleId, position, status: { state: 'passed' }, goal: { ...moduleWith({}).goal, baseline }, best, headCommit: head as Commit })
+    moduleWith({ id: id as ModuleId, position, status: { state: 'passed' }, goal: { ...moduleWith({}).goal, baseline }, best, bestCommit: head as Commit })
   const a = agentWith(moduleWith({}))
   a.project = {
     title: 'search-perf',
@@ -73,7 +73,12 @@ test('an ended project sums up what it did and where to start the next one', () 
     modules: [passed('m1', 1, 415, 371, 'a'.repeat(40)), { ...moduleWith({ id: 'm2' as ModuleId, position: 2 }), status: { state: 'abandoned', reason: 'x', followUp: null } }, passed('m3', 3, 371, 331, '9be1c04'.padEnd(40, '0'))],
   }
   // 415 -> 371 and 371 -> 331, chained, plus the abandoned module's 352 against its 371 baseline
-  assert.equal(boardLine(a, now), 'agent 1: Project: search-perf ended: 2 passed, 1 abandoned. p95 latency 24% lower overall. To keep climbing, create a new project from 9be1c04.')
+  assert.equal(boardLine(a, now), 'agent 1: Project: search-perf ended: 2 passed, 1 abandoned. p95 latency about 24% lower overall. To keep climbing, create a new project from 9be1c04.')
+  // Once the final job has measured start against end in one job, that's the number
+  a.project.final = { state: 'measuring' }
+  assert.match(boardLine(a, now), /abandoned\. Measuring its start against its end in one job now\./)
+  a.project.final = { state: 'done', metric: 'p95 latency', unit: 'ms', direction: 'lower', from: 415, to: 318, gain: 23.4, p: 0.004 }
+  assert.match(boardLine(a, now), /abandoned\. p95 latency 415 -> 318 ms, 23% lower over the project\. To keep/)
 })
 
 test('small values keep three significant figures', () => {

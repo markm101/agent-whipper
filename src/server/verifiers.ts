@@ -12,6 +12,8 @@ export interface VerifierUpload {
   commands: VerifierSpec['commands']
   hardware: string
   timeLimitMinutes: number
+  /** Benchmark runs per commit; the server's default without it. */
+  runs?: number
 }
 
 const MAX_FILES = 500
@@ -40,7 +42,8 @@ export function hashOf(u: VerifierUpload): string {
   const files = Object.keys(u.files)
     .sort()
     .map((p) => [p, u.files[p]])
-  const canonical = JSON.stringify({ files, image: u.image, commands: u.commands, hardware: u.hardware, timeLimitMinutes: u.timeLimitMinutes })
+  // runs joins the hash only when set, so sets without it keep the hash they had
+  const canonical = JSON.stringify({ files, image: u.image, commands: u.commands, hardware: u.hardware, timeLimitMinutes: u.timeLimitMinutes, ...(u.runs === undefined ? {} : { runs: u.runs }) })
   return createHash('sha256').update(canonical).digest('hex').slice(0, 16)
 }
 
@@ -51,6 +54,7 @@ export const specOf = (u: VerifierUpload): VerifierSpec => ({
   commands: u.commands,
   hardware: u.hardware,
   timeLimitMinutes: u.timeLimitMinutes,
+  ...(u.runs === undefined ? {} : { runs: u.runs }),
 })
 
 /** A change request's body: files to add or replace, null to delete, and any settings to change. */
@@ -75,6 +79,7 @@ export function merge(current: VerifierUpload, change: ChangeBody): { upload: Ve
     commands: change.commands ?? current.commands,
     hardware: change.hardware ?? current.hardware,
     timeLimitMinutes: change.timeLimitMinutes ?? current.timeLimitMinutes,
+    ...((change.runs ?? current.runs) === undefined ? {} : { runs: change.runs ?? current.runs }),
   }
   return { upload, changed: changed.sort() }
 }
@@ -93,10 +98,18 @@ export function rebase(base: VerifierUpload, current: VerifierUpload, proposed: 
     else files[path] = content
   }
   const changed = <T>(from: T, to: T) => JSON.stringify(from) !== JSON.stringify(to)
-  const pick = <K extends 'image' | 'hardware' | 'timeLimitMinutes'>(key: K): VerifierUpload[K] => (changed(base[key], proposed[key]) ? proposed[key] : current[key])
+  const pick = <K extends 'image' | 'hardware' | 'timeLimitMinutes' | 'runs'>(key: K): VerifierUpload[K] => (changed(base[key], proposed[key]) ? proposed[key] : current[key])
   // Commands merge one by one; step commands only when both sets have as many steps, since modules differ in steps
   const [b, c, n] = [base.commands, current.commands, proposed.commands]
   const command = (key: 'regression' | 'benchmark') => (b[key] !== n[key] ? n[key] : c[key])
   const steps = changed(b.steps, n.steps) && n.steps.length === c.steps.length ? n.steps : c.steps
-  return { files, image: pick('image'), commands: { regression: command('regression'), steps, benchmark: command('benchmark') }, hardware: pick('hardware'), timeLimitMinutes: pick('timeLimitMinutes') }
+  const runs = pick('runs')
+  return {
+    files,
+    image: pick('image'),
+    commands: { regression: command('regression'), steps, benchmark: command('benchmark') },
+    hardware: pick('hardware'),
+    timeLimitMinutes: pick('timeLimitMinutes'),
+    ...(runs === undefined ? {} : { runs }),
+  }
 }

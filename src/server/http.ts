@@ -131,7 +131,7 @@ function upload(body: unknown, steps: number): VerifierUpload {
   const b = object(body)
   const problem = filesProblem(b.files)
   if (problem) throw new HttpError(400, 'badSpec', problem)
-  const u = { files: b.files, image: b.image, commands: b.commands, hardware: b.hardware, timeLimitMinutes: b.timeLimitMinutes } as VerifierUpload
+  const u = { files: b.files, image: b.image, commands: b.commands, hardware: b.hardware, timeLimitMinutes: b.timeLimitMinutes, ...(b.runs === undefined ? {} : { runs: b.runs }) } as VerifierUpload
   const specProblem = verifierProblem({ ...u, hash: 'pending', paths: Object.keys(u.files) }, steps)
   if (specProblem) throw new HttpError(400, 'badSpec', specProblem)
   return u

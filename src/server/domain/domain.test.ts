@@ -467,14 +467,16 @@ test('a project sent while one is open waits in the queue and opens when the fir
 test('a new module goes right after the current one, and a repeat returns it', () => {
   const w = started()
   const extra = mod('early termination', ['only'])
-  assert.deepEqual(must(addModule(w, at(2), { agent: 'a', spec: extra })), { module: 'm3' })
-  assert.deepEqual(must(addModule(w, at(3), { agent: 'a', spec: extra })), { module: 'm3' })
+  assert.deepEqual(must(addModule(w, at(2), { agent: 'a', spec: extra })), { module: 'm3', position: 2 })
+  assert.deepEqual(must(addModule(w, at(3), { agent: 'a', spec: extra })), { module: 'm3', position: 2 })
+  // A second addition queues behind the first, not ahead of it
+  assert.deepEqual(must(addModule(w, at(3), { agent: 'a', spec: mod('score bound', ['only']) })), { module: 'm4', position: 3 })
   rejects(w, at(3), (x) => addModule(x, at(3), { agent: 'a', spec: mod('early termination', ['other']) }), 'titleTaken')
   rejects(w, at(3), (x) => addModule(x, at(3), { agent: 'a', spec: mod('retry', ['one'], { retryOf: 'm1' }) }), 'badSpec')
   rejects(w, at(3), (x) => addModule(x, at(3), { agent: 'nobody', spec: extra }), 'noAgent')
   assert.deepEqual(
     boardOf(w, at(3)).agents[0]!.project!.modules.map((m) => m.id),
-    ['m1', 'm3', 'm2'],
+    ['m1', 'm3', 'm4', 'm2'],
   )
 })
 
@@ -663,4 +665,42 @@ test('a decision carries a note, and an approval can also reach modules that hav
   assert.deepEqual(r, { state: 'approved', appliedTo: ['m2'] })
   assert.deepEqual([moduleOf(w, 'm2').verifiers.at(-1)!.hash, moduleOf(w, 'm2').verifiers.at(-1)!.author], ['h2b', 'verifier'])
   assert.deepEqual(changeOf(w, 'a', 'm1', change)!.note, 'Good catch.')
+})
+
+test('an ended project measures its start against its end in one job, and a passed module hands over its best commit', () => {
+  const w = started([mod('cache', ['one', 'two']), mod('index', ['only'])])
+  attempt(w, at(5), 'a1', 85)
+  // a flat attempt moves the head, but the module hands the next one its best commit
+  attempt(w, at(6), 'a2', 85.5)
+  assert.equal(viewOf(w, 'm1', at(6)).status.state, 'passed')
+  must(freezeVerifiers(w, at(7), { agent: 'a', module: 'm2', author: 'verifier', verifiers: verifiers(1, 'h2') }))
+  assert.deepEqual(run(w, at(8), 85).commits, [commit('a1')])
+  attempt(w, at(10), 'b1', 75)
+  const ended = boardOf(w, at(10)).agents[0]!
+  assert.deepEqual(ended.project!.final, { state: 'measuring' })
+  const final = must(claimJob(w, at(11), { runner: 'r1', labels: ['cpu'] }))!
+  assert.deepEqual([final.kind, final.tests, final.commits], ['final', [], [START, commit('b1')]])
+  const runs = around(START, 100).flatMap((x, i) => [x, around(commit('b1'), 76)[i]!])
+  must(sendResults(w, at(12), { job: final.job, runner: 'r1', results: { outcome: 'done', tests: { passed: 0, total: 0 }, runs, touched: [] } }))
+  const line = boardOf(w, at(12)).agents[0]!.line
+  assert.equal(line, `agent a: Project: search ended: 2 passed. p95 latency 100 -> 76 ms, 24% lower over the project. To keep climbing, create a new project from ${commit('b1').slice(0, 7)}.`)
+})
+
+test('a module’s verifiers can ask for more runs per commit', () => {
+  const w = emptyWorld()
+  must(createProject(w, at(0), { agent: 'a', spec: { title: 'noisy', startCommit: START, modules: [mod('cache')] } }))
+  rejects(w, at(0), (x) => freezeVerifiers(x, at(0), { agent: 'a', module: 'm1', author: 'v', verifiers: { ...verifiers(2), runs: 40 } }), 'badSpec')
+  must(freezeVerifiers(w, at(0), { agent: 'a', module: 'm1', author: 'v', verifiers: { ...verifiers(2), runs: 9 } }))
+  const t = must(claimJob(w, at(1), { runner: 'r1', labels: ['cpu'] }))!
+  assert.equal(t.runs, 9)
+  rejects(w, at(1), (x) => sendResults(x, at(1), { job: t.job, runner: 'r1', results: { outcome: 'done', tests: { passed: 1, total: 1 }, runs: around(START, 100), touched: [] } }), 'badResults')
+})
+
+test('abandoning a module says where the next one starts', () => {
+  const w = started([mod('cache', ['one']), mod('index', ['only'])])
+  attempt(w, at(5), 'a1', 99)
+  const r = must(abandon(w, at(6), { agent: 'a', module: 'm1', reason: 'Nothing here moves latency.' }))
+  assert.deepEqual(r, { followUp: null, startsFrom: START }, 'a flat attempt is dropped with the module')
+  must(freezeVerifiers(w, at(7), { agent: 'a', module: 'm2', author: 'verifier', verifiers: verifiers(1, 'h2') }))
+  assert.match(boardOf(w, at(7)).agents[0]!.line, new RegExp(`Waiting for its baseline\\. It starts from ${START.slice(0, 7)}\\.$`))
 })

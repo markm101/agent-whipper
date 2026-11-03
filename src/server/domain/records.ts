@@ -13,7 +13,8 @@ export const iso = (ms: Ms) => new Date(ms).toISOString() as Iso
 
 export type ModuleState = 'pending' | 'active' | 'pastTarget' | 'stuck' | 'passed' | 'abandoned'
 export type StuckCause = 'step' | 'target' | 'time'
-export type JobKind = 'baseline' | 'attempt' | 'stepCheck'
+/** `final` measures a finished project's start commit against its final commit, in one job. */
+export type JobKind = 'baseline' | 'attempt' | 'stepCheck' | 'final'
 
 export interface Config {
   /** For a module whose project and spec set no maxMinutes. */
@@ -67,6 +68,8 @@ export interface VerifierSpec {
   commands: { regression: string; steps: string[]; benchmark: string }
   hardware: string
   timeLimitMinutes: number
+  /** Benchmark runs per commit. Without it, the server's default. A noisy benchmark needs more. */
+  runs?: number
 }
 
 export interface JobResults {
@@ -183,6 +186,8 @@ export interface FlagRec {
 
 export interface ModuleRec {
   id: ModuleId
+  /** Added to an open project, so later additions queue behind it. */
+  added?: boolean
   /** The normalized spec it was created from, so a repeated call can be told from a clash. */
   specKey: string
   title: string

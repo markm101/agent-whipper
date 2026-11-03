@@ -47,11 +47,19 @@ export function startCommits(p: ProjectRec): (Commit | null)[] {
   let from: Commit | null = p.startCommit
   for (const m of p.modules) {
     out.push(from)
+    // An ended module leaves its best commit: its latest win, or its own start without one
     if (from === null || !ended(m.state)) from = null
-    else if (m.state === 'passed') from = headOf(m, from)
     else from = lastWin(m)?.commit ?? from
   }
   return out
+}
+
+/** The commit an ended project left behind, for the next project to start from. Null while it's open. */
+export function endCommit(p: ProjectRec): Commit | null {
+  const starts = startCommits(p)
+  const m = p.modules.at(-1)
+  if (!m || !ended(m.state)) return null
+  return lastWin(m)?.commit ?? starts.at(-1) ?? null
 }
 
 /** The pending module whose turn it is: the first that hasn't ended, if it's pending. */
@@ -79,6 +87,8 @@ export function waitsOf(m: ModuleRec, startedAt: Ms | null, now: Ms): WaitRec[] 
     if (to > at) out.push({ at, minutes: (to - at) / MINUTE })
   }
   for (const j of m.jobs) {
+    // A project's final measurement runs after its modules have stopped
+    if (j.kind === 'final') continue
     let from: Ms | null = j.queuedAt
     for (const c of j.claims) {
       add(from, c.at)

@@ -151,8 +151,16 @@ export interface Module {
   flags: Flag[]
 }
 
+/** An ended project's start commit measured against its final commit in one job. */
+export type ProjectResult =
+  | { state: 'measuring' }
+  | { state: 'done'; metric: string; unit: string; direction: Direction; from: number; to: number; gain: number; p: number }
+  | { state: 'failed' }
+
 export interface Project {
   title: string
+  /** Absent while the project is open, or when it kept no change to measure. */
+  final?: ProjectResult
   /** In position order. */
   modules: Module[]
   /** The module that is active, past target, or stuck, or else the next pending one. Null once the project ends. */
