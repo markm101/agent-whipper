@@ -22,6 +22,7 @@ function moduleWith(over: Partial<Module>): Module {
     ],
     goal: { metric: 'p95 latency', unit: 'ms', direction: 'lower', targetGain: 10, minGain: 2, ambitious: false, baseline: 371, target: 333.9 },
     verifiers: { kind: 'missing' },
+    changes: [],
     best: 352,
     bestCommit: null,
     headCommit: null,

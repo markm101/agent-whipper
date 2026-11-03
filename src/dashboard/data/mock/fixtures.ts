@@ -127,7 +127,8 @@ function story(events: Event[], agent: string, t0: Ms) {
       })
     },
     change(min: number, module: string, reason: string) {
-      on(min, (w, at) => must(fileChange(w, at, { agent, module, reason, proposed: verifiersFor(agent, plans.get(module)!, 'cpu', 2) }, MOCK_CONFIG)))
+      const proposed = (w: World) => verifiersFor(agent, plans.get(module)!, verifiersOf(locate(w, agent, module)!.m)!.hardware, 2)
+      on(min, (w, at) => must(fileChange(w, at, { agent, module, reason, proposed: proposed(w), changed: [`bench/${plans.get(module)!.bench}.ts`] }, MOCK_CONFIG)))
     },
     blurb: (min: number, text: string) => on(min, (w, at) => must(setBlurb(w, at, { agent, blurb: text }, MOCK_CONFIG))),
   }

@@ -5,15 +5,26 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from './App.tsx'
 import { SourceProvider } from './data/hooks.tsx'
-import { createMockSource } from './data/mock/source.ts'
+import type { BoardSource } from './data/source.ts'
 
-// The mock until whip-server exists; an HTTP source with the same interface replaces it
-const source = createMockSource()
+// whip-server serves the built dashboard; the hosted demo and `npm run dev` use the mock
+const data = import.meta.env.VITE_DATA ?? (import.meta.env.DEV ? 'mock' : 'http')
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <SourceProvider source={source}>
-      <App />
-    </SourceProvider>
-  </StrictMode>,
-)
+async function sourceFor(): Promise<BoardSource> {
+  if (data === 'mock') return (await import('./data/mock/source.ts')).createMockSource()
+  return (await import('./data/http.ts')).createHttpSource()
+}
+
+const root = createRoot(document.getElementById('root')!)
+try {
+  const source = await sourceFor()
+  root.render(
+    <StrictMode>
+      <SourceProvider source={source}>
+        <App />
+      </SourceProvider>
+    </StrictMode>,
+  )
+} catch (e) {
+  root.render(<p className="empty">Couldn’t load the board from whip-server: {(e as Error).message}</p>)
+}

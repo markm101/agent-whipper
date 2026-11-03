@@ -96,6 +96,17 @@ export interface Flag {
   at: Iso
 }
 
+export interface ChangeRequest {
+  id: ChangeId
+  author: string
+  reason: string
+  /** Paths whose content differs from the frozen verifiers. */
+  files: string[]
+  state: 'open' | 'approved' | 'rejected'
+  filedAt: Iso
+  decidedAt: Iso | null
+}
+
 export interface Module {
   id: ModuleId
   /** 1-based position in the project. Shifts when a module is inserted; the ID never does. */
@@ -105,6 +116,8 @@ export interface Module {
   steps: Step[]
   goal: Goal
   verifiers: Verifiers
+  /** Verifier change requests, oldest first. */
+  changes: ChangeRequest[]
   /** The best commit's median. Null before the baseline lands. */
   best: number | null
   bestCommit: Commit | null

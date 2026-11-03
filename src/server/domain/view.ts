@@ -71,6 +71,7 @@ function moduleOf(p: ProjectRec, m: ModuleRec, now: Ms): Module {
     steps: m.steps.map((s, i) => ({ title: s.title, done: s.doneAt !== null, failedTurns: failedTurns(m, i + 1) })),
     goal: { ...m.goal, baseline: f.baseline, target: f.target },
     verifiers: v ? { kind: 'frozen', hash: v.hash, tests, author: v.author, hardware: v.hardware, openChanges: m.changes.filter((c) => c.state === 'open').length } : { kind: 'missing' },
+    changes: m.changes.map((c) => ({ id: c.id, author: c.author, reason: c.reason, files: c.changed, state: c.state, filedAt: iso(c.filedAt), decidedAt: c.decidedAt === null ? null : iso(c.decidedAt) })),
     best: f.bestValue,
     bestCommit: f.best,
     headCommit: f.head,

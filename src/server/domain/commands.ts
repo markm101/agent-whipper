@@ -69,6 +69,7 @@ const normalModule = (s: ModuleSpec): ModuleSpec => ({
 const normalProject = (s: ProjectSpec): ProjectSpec => ({
   title: s.title.trim(),
   startCommit: s.startCommit.toLowerCase(),
+  ...(s.repo === undefined ? {} : { repo: s.repo }),
   ...(s.maxMinutes === undefined ? {} : { maxMinutes: s.maxMinutes }),
   modules: s.modules.map(normalModule),
 })
@@ -111,7 +112,7 @@ function moduleFrom(a: AgentRec, spec: ModuleSpec, projectMax: number | null, co
 function open(a: AgentRec, spec: ProjectSpec, at: Ms, config: Config) {
   if (a.project) a.past.push(a.project)
   const maxMinutes = spec.maxMinutes ?? null
-  const p: ProjectRec = { title: spec.title, specKey: keyOf(spec), startCommit: spec.startCommit as Commit, maxMinutes, modules: [], openedAt: at }
+  const p: ProjectRec = { title: spec.title, specKey: keyOf(spec), startCommit: spec.startCommit as Commit, repo: spec.repo ?? null, maxMinutes, modules: [], openedAt: at }
   p.modules = spec.modules.map((s) => moduleFrom(a, s, maxMinutes, config))
   a.project = p
 }
@@ -168,8 +169,9 @@ function advance(w: World, a: AgentRec, at: Ms, config: Config) {
   if (!p || !m || !v) return
   const start = startCommits(p)[p.modules.indexOf(m)]
   if (!start) return
-  // A baseline that failed waits for new verifiers, which change the key
+  // One in flight keeps the verifiers it was queued with, and one that failed waits for new verifiers, which change the key
   const key = jobKey('baseline', a, m, start, null, null, v.hash)
+  if (m.jobs.some((j) => j.kind === 'baseline' && (j.state === 'queued' || j.state === 'running'))) return
   if (m.jobs.some((j) => j.key === key && j.state !== 'cancelled')) return
   queue(w, a, m, 'baseline', { step: null, commit: start, bestCommit: null, stepTests: [] }, at)
 }
@@ -339,7 +341,7 @@ export function freezeVerifiers(w: World, at: Ms, args: { agent: string; module:
 export function fileChange(
   w: World,
   at: Ms,
-  args: { agent: string; module: string; reason: string; proposed: VerifierSpec },
+  args: { agent: string; module: string; reason: string; proposed: VerifierSpec; changed?: string[] },
   config: Config = DEFAULTS,
 ): Result<{ change: ChangeId }> {
   settle(w, at, config)
@@ -357,7 +359,8 @@ export function fileChange(
   if (same) return ok({ change: same.id })
   w.changes++
   const id = `c${w.changes}` as ChangeId
-  m.changes.push({ id, author: a.id, reason: args.reason.trim(), proposed: normalVerifiers(args.proposed), state: 'open', filedAt: at, decidedAt: null })
+  const changed = Array.isArray(args.changed) ? args.changed.filter((x) => typeof x === 'string').slice(0, 200) : [...args.proposed.paths]
+  m.changes.push({ id, author: a.id, reason: args.reason.trim(), proposed: normalVerifiers(args.proposed), changed, state: 'open', filedAt: at, decidedAt: null })
   return ok({ change: id })
 }
 
@@ -506,6 +509,8 @@ export interface Ticket {
   agent: AgentId
   module: ModuleId
   step: number | null
+  /** Where to fetch the commits. Null means the runner's default remote. */
+  repo: string | null
   /** The commits to benchmark, alternating in this order: the best commit first, then the one under test. */
   commits: Commit[]
   /** The commit whose tests run. */
@@ -532,6 +537,7 @@ export function claimJob(w: World, at: Ms, args: { runner: string; labels: strin
     .sort((x, y) => x.j.queuedAt - y.j.queuedAt || Number(x.j.id.slice(1)) - Number(y.j.id.slice(1)))[0]
   if (!pick) return ok(null)
   const { a, m, j } = pick
+  const repo = locate(w, a.id, m.id)!.p.repo
   const leaseUntil = at + config.leaseMinutes * MINUTE
   j.state = 'running'
   j.claims.push({ runner: args.runner, at, leaseUntil, endedAt: null, lapsed: false })
@@ -542,6 +548,7 @@ export function claimJob(w: World, at: Ms, args: { runner: string; labels: strin
     agent: a.id,
     module: m.id,
     step: j.step,
+    repo,
     commits: j.bestCommit === null || j.bestCommit === j.commit ? [j.commit] : [j.bestCommit, j.commit],
     commit: j.commit,
     verifierHash: v.hash,

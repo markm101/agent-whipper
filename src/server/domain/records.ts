@@ -52,6 +52,8 @@ export interface ModuleSpec {
 export interface ProjectSpec {
   title: string
   startCommit: string
+  /** The git remote the runner fetches commits from. Without one, the runner uses its default. */
+  repo?: string
   maxMinutes?: number
   modules: ModuleSpec[]
 }
@@ -106,6 +108,8 @@ export interface ChangeRec {
   author: string
   reason: string
   proposed: VerifierSpec
+  /** Paths the change adds, removes, or edits. */
+  changed: string[]
   state: 'open' | 'approved' | 'rejected'
   filedAt: Ms
   decidedAt: Ms | null
@@ -188,6 +192,7 @@ export interface ProjectRec {
   title: string
   specKey: string
   startCommit: Commit
+  repo: string | null
   maxMinutes: number | null
   modules: ModuleRec[]
   openedAt: Ms

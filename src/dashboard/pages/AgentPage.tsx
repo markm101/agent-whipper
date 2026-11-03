@@ -1,4 +1,5 @@
 import type { AgentId } from '../../shared/api.ts'
+import { ChangeRequests } from '../components/ChangeRequests.tsx'
 import { ModuleList } from '../components/ModuleList.tsx'
 import { ModulePanel } from '../components/ModulePanel.tsx'
 import { PageHead } from '../components/PageHead.tsx'
@@ -47,6 +48,7 @@ export function AgentPage({ id }: { id: AgentId }) {
           </section>
         )}
         {m ? <ModulePanel agent={agent} m={m} now={now} /> : p && <p className="empty">Every module in {p.title} has ended.</p>}
+        <ChangeRequests agent={agent} />
       </div>
     </>
   )

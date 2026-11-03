@@ -1,6 +1,6 @@
 // Screenshots dashboard pages in the system Firefox and prints the pages'
 // console warnings and errors. Usage:
-//   node scripts/shoot.mjs http://127.0.0.1:5320 / /agents/1 [--widths 1280,390] [--wait 1500] [--out shots] [--frames 1] [--every 1000]
+//   node scripts/shoot.mjs http://127.0.0.1:5320 / /agents/1 [--widths 1280,390] [--wait 1500] [--out shots] [--frames 1] [--every 1000] [--auth user:password]
 import puppeteer from 'puppeteer-core'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
@@ -17,9 +17,14 @@ const wait = Number(flag('wait', 1500))
 const out = flag('out', 'shots')
 const frames = Number(flag('frames', 1))
 const every = Number(flag('every', 1000))
+const auth = flag('auth', null)
 
 const browser = await puppeteer.launch({ browser: 'firefox', executablePath: process.env.FIREFOX_PATH ?? '/usr/bin/firefox', headless: true })
 const page = await browser.newPage()
+if (auth) {
+	const [username, ...rest] = auth.split(':')
+	await page.authenticate({ username, password: rest.join(':') })
+}
 const notes = []
 page.on('console', (m) => {
 	if (['warn', 'error'].includes(m.type())) notes.push(`${m.type()}: ${m.text()}`)

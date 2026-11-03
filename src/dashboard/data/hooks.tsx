@@ -23,6 +23,12 @@ export function useBoard() {
   return useSyncExternalStore(useSubscribe(source), () => source.current())
 }
 
+/** The source's change-request action, or null when it has none. */
+export function useDecide() {
+  const source = useSource()
+  return source.decide ? source.decide.bind(source) : null
+}
+
 export function useAttemptDetail(agent: AgentId, module: ModuleId, attempt: AttemptId) {
   const source = useSource()
   return useSyncExternalStore(useSubscribe(source), () => source.attempt(agent, module, attempt))

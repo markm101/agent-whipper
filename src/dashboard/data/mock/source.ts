@@ -1,6 +1,6 @@
 import type { AttemptDetail, Board } from '../../../shared/api.ts'
 import type { BoardSource } from '../source.ts'
-import { settle } from '../../../server/domain/commands.ts'
+import { decideChange, settle } from '../../../server/domain/commands.ts'
 import type { World } from '../../../server/domain/records.ts'
 import { attemptDetailOf, boardOf } from '../../../server/domain/view.ts'
 import { initialWorld } from './fixtures.ts'
@@ -21,6 +21,13 @@ export function createMockSource({ every = 3500, now = Date.now }: MockOptions =
   const listeners = new Set<() => void>()
   let timer: ReturnType<typeof setInterval> | undefined
 
+  const publish = (at: number) => {
+    settle(world, at, MOCK_CONFIG)
+    board = boardOf(world, at)
+    details = new Map()
+    for (const listener of listeners) listener()
+  }
+
   const tick = () => {
     const at = now()
     const event = TIMELINE[next]
@@ -29,10 +36,7 @@ export function createMockSource({ every = 3500, now = Date.now }: MockOptions =
       event.run(world, at)
       next++
     }
-    settle(world, at, MOCK_CONFIG)
-    board = boardOf(world, at)
-    details = new Map()
-    for (const listener of listeners) listener()
+    publish(at)
   }
 
   return {
@@ -51,6 +55,14 @@ export function createMockSource({ every = 3500, now = Date.now }: MockOptions =
       const key = `${agent}/${module}/${attempt}`
       if (!details.has(key)) details.set(key, attemptDetailOf(world, agent, module, attempt))
       return details.get(key) ?? null
+    },
+    async decide(change, approve) {
+      const at = now()
+      world = structuredClone(world)
+      const r = decideChange(world, at, { change, approve }, MOCK_CONFIG)
+      if (!r.ok) return r.rejection.message
+      publish(at)
+      return null
     },
   }
 }

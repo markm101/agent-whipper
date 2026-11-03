@@ -104,6 +104,7 @@ export function projectProblem(s: ProjectSpec | undefined, config: Config): stri
   if (!s || typeof s !== 'object') return 'A project spec must be an object.'
   if (!isText(s.title, 80)) return 'A project needs a one-line title.'
   if (!isCommit(s.startCommit)) return 'startCommit must be a commit hash.'
+  if (s.repo !== undefined && (!isText(s.repo, 300) || /\s/.test(s.repo))) return 'repo must be a git remote URL.'
   if (!Array.isArray(s.modules) || s.modules.length === 0) return 'A project needs at least one module.'
   if (s.modules.length > 50) return 'A project can have at most 50 modules.'
   const titles = new Set<string>()
