@@ -1,0 +1,397 @@
+.agent {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.section-label {
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-faint);
+}
+
+/* The board line, as the hook shows it */
+
+.line {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-strong);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Modules, as the Plan demo lists them */
+
+.modules {
+  padding: 0;
+  overflow: hidden;
+}
+
+.modules__row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 230px 110px;
+  grid-template-areas: 'pos name verifiers state';
+  align-items: center;
+  gap: 12px;
+  padding: 10px var(--inset);
+  border-top: 1px solid var(--line-faint);
+}
+
+.modules__row:first-child {
+  border-top: 0;
+}
+
+.modules__row[data-current] {
+  background: var(--ink-1);
+}
+
+.modules__pos {
+  grid-area: pos;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.modules__name {
+  grid-area: name;
+  min-width: 0;
+}
+
+.modules__title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.modules__title .mono {
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.modules__tag {
+  align-self: center;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  background: var(--ink-2);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-strong);
+}
+
+.modules__sub {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.modules__fact {
+  white-space: nowrap;
+}
+
+.modules__reason {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text);
+}
+
+.modules__verifiers {
+  grid-area: verifiers;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.modules__verifiers-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.modules__warn {
+  font-size: 11px;
+  color: var(--warning-text);
+}
+
+.modules__state {
+  grid-area: state;
+  justify-self: end;
+}
+
+@media (max-width: 760px) {
+  .modules__row {
+    grid-template-columns: 20px minmax(0, 1fr) auto;
+    grid-template-areas:
+      'pos name state'
+      '. verifiers verifiers';
+    row-gap: 6px;
+    align-items: start;
+  }
+}
+
+/* The current module */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.panel > .section-label {
+  margin-bottom: -8px;
+}
+
+.panel__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 6px;
+  min-height: 22px;
+}
+
+.panel__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.panel__streak {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--radius-pill);
+  background: var(--success-soft);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--success-text);
+}
+
+.panel__grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.panel__note {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.panel__note[data-kind='grace'] {
+  color: var(--warning-text);
+}
+
+@media (max-width: 900px) {
+  .panel__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Steps */
+
+.steps__row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  grid-template-areas:
+    'mark title'
+    '. status';
+  column-gap: 10px;
+  row-gap: 2px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line-faint);
+}
+
+.steps__row:first-child {
+  border-top: 0;
+  padding-top: 2px;
+}
+
+.steps__mark {
+  grid-area: mark;
+  display: grid;
+  place-items: center;
+  height: 18px;
+  color: var(--accent);
+}
+
+.steps__ring {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1.5px solid var(--ink-5);
+}
+
+.steps__row[data-state='current'] .steps__ring {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.steps__row[data-state='failed'] .steps__ring {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.steps__title {
+  grid-area: title;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--text);
+}
+
+.steps__row[data-state='current'] .steps__title,
+.steps__row[data-state='failed'] .steps__title {
+  font-weight: 500;
+  color: var(--text-strong);
+}
+
+.steps__n {
+  margin-right: 8px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.steps__status {
+  grid-area: status;
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 8px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.steps__row[data-state='failed'] .steps__status {
+  color: var(--danger-text);
+}
+
+.steps__turns[data-some] {
+  color: var(--danger-text);
+}
+
+/* Attempts */
+
+.attempts-wrap {
+  margin: 0 calc(-1 * var(--inset));
+}
+
+.attempts {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.attempts th,
+.attempts td {
+  padding: 7px 8px;
+  text-align: left;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.attempts tr > :first-child {
+  padding-left: var(--inset);
+}
+
+.attempts tr > :last-child {
+  padding-right: var(--inset);
+}
+
+.attempts thead th {
+  padding-top: 0;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-faint);
+}
+
+.attempts tbody tr {
+  position: relative;
+  border-top: 1px solid var(--line-faint);
+}
+
+.attempts tbody tr:hover {
+  background: var(--ink-1);
+}
+
+.attempts tbody th {
+  font-weight: 400;
+}
+
+.attempts .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.attempts__link {
+  color: var(--text-strong);
+}
+
+/* The row is the link's hit area */
+.attempts__link::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+}
+
+.attempts td.attempts__note {
+  width: 100%;
+  min-width: 180px;
+  white-space: normal;
+  color: var(--text);
+}
+
+.attempts__median {
+  color: var(--text-strong);
+}
+
+@media (max-width: 760px) {
+  .attempts .col-wide {
+    display: none;
+  }
+}
+
+/* Flags, as the Flags demo shows them */
+
+.flags {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.flag {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--warning-soft);
+  color: var(--warning-text);
+}
+
+.flag__title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.flag__body {
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.flag__meta {
+  margin-top: 6px;
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+.flag .text-link {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

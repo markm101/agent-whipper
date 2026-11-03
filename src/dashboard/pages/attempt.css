@@ -1,0 +1,203 @@
+/* Laid out like the Job demo: checkouts beside the runs and the checks, at about its width */
+.at-page {
+  max-width: 1040px;
+}
+
+.at {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.at__side {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.at__commit {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-strong);
+}
+
+.at__rule {
+  height: 1px;
+  background: var(--line-faint);
+}
+
+.at__line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.at__line .mono {
+  color: var(--text-strong);
+}
+
+.at__bad {
+  color: var(--danger-text);
+}
+
+.at__note {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-strong);
+}
+
+.at__runs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 240px;
+  gap: 24px;
+  align-items: start;
+}
+
+.at__no-runs {
+  align-self: center;
+}
+
+.runs {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.runs th,
+.runs td {
+  padding: 3px 0;
+  text-align: left;
+  font-weight: 400;
+}
+
+.runs thead th {
+  padding-bottom: 6px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.runs thead .mono {
+  font-size: 11px;
+}
+
+.runs th:first-child,
+.runs td:first-child {
+  width: 48px;
+}
+
+.runs .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.runs tbody td.num {
+  color: var(--text-strong);
+}
+
+.runs tfoot > tr > * {
+  padding-top: 7px;
+  border-top: 1px solid var(--line);
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.runs[data-arriving] tbody tr,
+.runs[data-arriving] tfoot tr {
+  animation: run-in 0.35s var(--ease-out) both;
+}
+
+@keyframes run-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+}
+
+.at__checks {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 0;
+}
+
+.at__check {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.at__checks[data-arriving] .at__check {
+  animation: run-in 0.35s var(--ease-out) both;
+}
+
+.at__check dd {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-strong);
+}
+
+.at__check dd.at__warn {
+  color: var(--warning-text);
+}
+
+.at__main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.at__touched,
+.at__flags {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.at__file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 14px;
+  row-gap: 4px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line-faint);
+}
+
+.at__path {
+  color: var(--text-strong);
+}
+
+.at__tag {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text);
+}
+
+@media (max-width: 900px) {
+  .at {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .at,
+  .at__main {
+    gap: 12px;
+  }
+
+  .at__runs {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+
+  .at__tag {
+    margin-left: 0;
+  }
+}

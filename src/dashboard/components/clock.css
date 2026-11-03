@@ -1,0 +1,239 @@
+.clock__plot {
+  position: relative;
+  height: 134px;
+  container-type: inline-size;
+}
+
+/* Inset so the first and last tick labels, centered on their minute, stay inside the card */
+.clock__rail {
+  position: absolute;
+  inset: 0 14px;
+}
+
+.clock__track,
+.clock__limit,
+.clock__elapsed,
+.clock__wait,
+.clock__ext,
+.clock__grace {
+  position: absolute;
+  top: 76px;
+  height: 10px;
+}
+
+.clock__track {
+  left: 0;
+  right: 0;
+  border-radius: 5px;
+  background: var(--ink-1);
+}
+
+.clock__limit {
+  left: 0;
+  border-radius: 5px 0 0 5px;
+  background: var(--ink-3);
+}
+
+.clock__elapsed {
+  left: 0;
+  border-radius: 5px 0 0 5px;
+  background: var(--accent);
+  transition: width 1s linear;
+}
+
+.clock__wait {
+  z-index: 1;
+  background: repeating-linear-gradient(135deg, var(--ink-5) 0 3px, var(--surface) 3px 7px);
+  box-shadow: inset 0 0 0 1px var(--ink-4);
+  animation: clock-in 0.5s ease both;
+}
+
+.clock__ext {
+  background: var(--success-soft);
+  box-shadow: inset 0 0 0 1px var(--success);
+  animation: clock-in 0.6s var(--ease-out) both;
+}
+
+.clock__grace {
+  z-index: 2;
+  background: color-mix(in srgb, var(--warning) 35%, var(--surface));
+  animation: clock-in 0.4s ease both;
+}
+
+.clock__grace[data-open] {
+  background: color-mix(in srgb, var(--warning) 60%, var(--surface));
+}
+
+.clock__ext-label {
+  position: absolute;
+  top: 40px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--success-text);
+  white-space: nowrap;
+  transform: translateX(-50%);
+  animation: clock-in 0.6s ease both;
+}
+
+/* A label shows only where its band is wide enough to hold it */
+.clock__ext-label[data-size='tiny'] {
+  display: none;
+}
+
+@container (width < 560px) {
+  .clock__ext-label[data-size='narrow'] {
+    display: none;
+  }
+}
+
+.clock__under {
+  position: absolute;
+  top: 114px;
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  transform: translateX(-50%);
+  animation: clock-in 0.5s ease both;
+}
+
+.clock__under--grace {
+  color: var(--warning-text);
+}
+
+.clock__deadline {
+  position: absolute;
+  top: 26px;
+  z-index: 3;
+  width: 0;
+  height: 66px;
+  margin-left: -1px;
+  border-left: 2px solid var(--ink-5);
+  transition: left 0.7s cubic-bezier(0.45, 0, 0.1, 1);
+}
+
+.clock__deadline-label {
+  position: absolute;
+  top: -20px;
+  left: 0;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-strong);
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+
+.clock__deadline-label[data-edge='end'] {
+  transform: translateX(calc(-100% + 8px));
+}
+
+.clock__now {
+  position: absolute;
+  top: 72px;
+  z-index: 3;
+  width: 2px;
+  height: 18px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--text-strong);
+  transition: left 1s linear;
+}
+
+.clock__dot,
+.clock__step {
+  position: absolute;
+  top: 60px;
+  width: 8px;
+  height: 8px;
+  margin-left: -4px;
+  border-radius: 50%;
+  animation: dot-in 0.45s var(--ease-out) both;
+}
+
+.clock__dot[data-v='win'] {
+  background: var(--accent);
+}
+
+.clock__dot[data-v='flat'] {
+  border: 1.5px solid var(--text-faint);
+}
+
+.clock__dot[data-v='fail'] {
+  background: var(--danger);
+}
+
+.clock__dot[data-v='pending'] {
+  border: 1.5px solid var(--accent);
+  animation: dot-pulse 1.2s ease-in-out infinite;
+}
+
+/* A finished step that held the metric, as the Clock demo marks it */
+.clock__step {
+  top: 48px;
+  border-radius: 2px;
+  border: 1.5px solid var(--accent);
+}
+
+.clock__tick {
+  position: absolute;
+  top: 94px;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  transform: translateX(-50%);
+}
+
+.clock__legend {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 16px;
+  row-gap: 6px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.clock__legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.clock__swatch {
+  flex: none;
+  width: 14px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.clock__swatch[data-kind='limit'] {
+  background: var(--ink-3);
+}
+
+.clock__swatch[data-kind='used'] {
+  background: var(--accent);
+}
+
+.clock__swatch[data-kind='wait'] {
+  background: repeating-linear-gradient(135deg, var(--ink-5) 0 2px, var(--surface) 2px 4px);
+  box-shadow: inset 0 0 0 1px var(--ink-4);
+}
+
+.clock__swatch[data-kind='ext'] {
+  background: var(--success-soft);
+  box-shadow: inset 0 0 0 1px var(--success);
+}
+
+.clock__swatch[data-kind='grace'] {
+  background: color-mix(in srgb, var(--warning) 60%, var(--surface));
+}
+
+.clock__swatch[data-kind='step'] {
+  width: 8px;
+  border: 1.5px solid var(--accent);
+}
+
+@keyframes clock-in {
+  from {
+    opacity: 0;
+  }
+}

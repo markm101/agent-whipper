@@ -1,0 +1,141 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 9px;
+  border-radius: var(--radius-pill);
+  background: var(--ink-2);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--text-strong);
+  white-space: nowrap;
+  transition:
+    background-color 0.35s ease,
+    color 0.35s ease;
+}
+
+/* A round mark reads further in than a letter, so that side is 2px tighter */
+.badge[data-lead] {
+  padding-left: 7px;
+}
+
+.badge[data-tone='accent'] {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.badge[data-tone='success'] {
+  background: var(--success-soft);
+  color: var(--success-text);
+}
+
+.badge[data-tone='danger'] {
+  background: var(--danger-soft);
+  color: var(--danger-text);
+}
+
+.badge[data-tone='warning'] {
+  background: var(--warning-soft);
+  color: var(--warning-text);
+}
+
+.badge__label {
+  display: block;
+  text-box: trim-both cap alphabetic;
+}
+
+.badge__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.meter {
+  display: block;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--ink-1);
+}
+
+.meter__fill {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--accent);
+  transition:
+    clip-path 0.8s cubic-bezier(0.45, 0, 0.2, 1),
+    background-color 0.4s ease;
+}
+
+.meter[data-tone='warning'] .meter__fill {
+  background: var(--warning);
+}
+
+.meter[data-tone='ink'] .meter__fill {
+  background: var(--ink-5);
+}
+.meter[data-tone='success'] .meter__fill {
+  background: var(--success);
+}
+
+.spinner {
+  flex: none;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+.icon {
+  display: block;
+  flex: none;
+}
+
+.dot {
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.dot[data-fresh] {
+  animation: dot-in 0.5s var(--ease-out) both;
+}
+
+.dot[data-v='win'] {
+  background: var(--accent);
+}
+
+.dot[data-v='flat'] {
+  border: 1.5px solid var(--text-faint);
+}
+
+.dot[data-v='fail'] {
+  background: var(--danger);
+}
+
+.dot[data-v='pending'] {
+  border: 1.5px solid var(--accent);
+  animation: dot-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes dot-in {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+}
+
+@keyframes dot-pulse {
+  50% {
+    box-shadow: 0 0 0 4px var(--accent-soft);
+  }
+}

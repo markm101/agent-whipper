@@ -1,0 +1,217 @@
+/* Card A. Each card spans eight board rows as a subgrid, one per line, so a
+   line sits at the same height across a row of cards even when a blurb wraps
+   or one card has a callout. */
+.agent-card {
+  position: relative;
+  grid-row: span 8;
+  display: grid;
+  grid-template-rows: subgrid;
+  row-gap: 0;
+  align-content: start;
+  min-width: 0;
+  padding: 14px 16px 16px;
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--text);
+  transition:
+    background-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.agent-card:hover {
+  background: color-mix(in srgb, var(--surface) 92%, #fff);
+}
+
+.agent-card:has(.agent-card__link:focus-visible) {
+  box-shadow:
+    var(--shadow-card),
+    0 0 0 2px var(--accent);
+}
+
+.agent-card--idle {
+  grid-row: span 2;
+}
+
+.agent-card__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+}
+
+.agent-card__agent {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+/* The whole card is the link's hit area; the link itself stays one short name */
+.agent-card__link::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+
+.agent-card__link:focus-visible {
+  outline: none;
+}
+
+.agent-card__dot {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--tone);
+  transition: background-color 0.3s ease;
+}
+
+.agent-card__dot--busy {
+  width: 10px;
+  height: 10px;
+  margin: -1px;
+  background: none;
+  color: var(--tone);
+}
+
+.agent-card__dot[data-tone='idle'] {
+  --tone: var(--ink-5);
+}
+
+.agent-card__dot[data-tone='accent'] {
+  --tone: var(--accent);
+}
+
+.agent-card__dot[data-tone='warning'] {
+  --tone: var(--warning);
+}
+
+.agent-card__dot[data-tone='danger'] {
+  --tone: var(--danger);
+}
+
+.agent-card__dot[data-tone='success'] {
+  --tone: var(--success);
+}
+
+.agent-card__corner {
+  margin-left: auto;
+  white-space: nowrap;
+  color: var(--text-faint);
+}
+
+.agent-card__corner[data-tone='warning'] {
+  color: var(--warning-text);
+}
+
+.agent-card__corner[data-tone='danger'] {
+  color: var(--danger-text);
+}
+
+.agent-card__corner[data-tone='success'] {
+  color: var(--success-text);
+}
+
+.agent-card__sub {
+  margin-top: 3px;
+  color: var(--text-faint);
+}
+
+.agent-card__metric {
+  margin-top: 14px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.agent-card__value {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 2px;
+  white-space: nowrap;
+}
+
+.agent-card__number {
+  font-size: 24px;
+  line-height: 30px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-strong);
+}
+
+.agent-card__unit {
+  font-size: 13px;
+  color: var(--text-faint);
+}
+
+.agent-card__none {
+  font-size: 15px;
+  line-height: 30px;
+  font-weight: 500;
+  color: var(--text-faint);
+}
+
+.agent-card__target {
+  margin-left: auto;
+  color: var(--text-faint);
+}
+
+.agent-card__bar.meter {
+  height: 6px;
+  margin-top: 8px;
+}
+
+.agent-card__under {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+  margin-top: 6px;
+  color: var(--text-faint);
+}
+
+.agent-card__chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  margin-left: auto;
+  padding: 0 8px;
+  border-radius: var(--radius-pill);
+  background: var(--success-soft);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--success-text);
+}
+
+.agent-card__blurb {
+  margin-top: 12px;
+  color: var(--text);
+}
+
+.agent-card__blurb[data-empty] {
+  color: var(--text-faint);
+}
+
+.agent-card__callout {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  line-height: 1.4;
+}
+
+.agent-card__callout[data-tone='warning'] {
+  background: var(--warning-soft);
+  color: var(--warning-text);
+}
+
+.agent-card__callout[data-tone='danger'] {
+  background: var(--danger-soft);
+  color: var(--danger-text);
+}

@@ -1,0 +1,25 @@
+.board-grid {
+  --tile-gap: 16px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* Rows are the tiles' subgrid tracks, so the space between tiles is their margin */
+  column-gap: var(--tile-gap);
+  row-gap: 0;
+}
+
+.board-grid > .agent-card {
+  margin-bottom: var(--tile-gap);
+}
+
+@media (max-width: 1040px) {
+  .board-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .board-grid {
+    --tile-gap: 12px;
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
