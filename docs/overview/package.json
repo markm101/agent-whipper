@@ -1,0 +1,23 @@
+{
+  "name": "agent-whipper-overview",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5310",
+    "build": "vite build && node inline.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "lucide-react": "0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.7.0",
+    "puppeteer-core": "^25.16.0",
+    "typescript": "^5.6.3",
+    "vite": "^6.4.5"
+  }
+}

@@ -1,0 +1,90 @@
+.gl {
+  .gl-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 320px;
+    gap: 16px;
+    align-items: start;
+  }
+
+  .gl-goal {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px 24px;
+    padding: 18px 20px;
+  }
+
+  .gl-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .gl-value {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--ss-text-strong);
+  }
+
+  .gl-faint {
+    font-weight: 400;
+    color: var(--ss-text-faint);
+  }
+
+  .gl-over {
+    color: var(--ss-danger-text);
+  }
+
+  .gl-with-icon {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    white-space: nowrap;
+  }
+
+  .gl-log {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .gl-req {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 2px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--ss-canvas);
+  }
+
+  .gl-req__result {
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  .gl-req[data-v='no'] .gl-req__result {
+    color: var(--ss-danger-text);
+  }
+
+  .gl-req[data-v='ok'] .gl-req__result {
+    color: var(--ss-success-text);
+  }
+
+  & .ss-stage[data-layout='compact'] {
+    --gutter: 16px;
+  }
+
+  & .ss-stage[data-layout='compact'] .aw-app {
+    padding: 14px 14px 0;
+  }
+
+  & .ss-stage[data-layout='compact'] .gl-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  & .ss-stage[data-layout='compact'] .gl-goal {
+    padding: 14px 16px;
+    gap: 14px 16px;
+  }
+}

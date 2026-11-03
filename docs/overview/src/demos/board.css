@@ -1,0 +1,39 @@
+.bd {
+  .bd-frame {
+    bottom: 0;
+    mask-image: linear-gradient(to bottom, #000 76%, transparent);
+  }
+
+  .bd-focus {
+    display: grid;
+    transition: opacity 0.4s ease;
+  }
+
+  .bd-focus[data-down] {
+    opacity: 0;
+  }
+
+  .bd-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 16px;
+  }
+
+  & .ss-stage[data-layout='compact'] {
+    --gutter: 16px;
+  }
+
+  & .ss-stage[data-layout='compact'] .aw-app {
+    padding: 14px 14px 0;
+  }
+
+  & .ss-stage[data-layout='compact'] .bd-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  & .ss-stage[data-layout='compact'] .bd-wide-only,
+  & .ss-stage[data-layout='compact'] .aw-tile--filler {
+    display: none;
+  }
+}

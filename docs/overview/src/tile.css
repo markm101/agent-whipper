@@ -1,0 +1,271 @@
+.aw-tile {
+  display: flex;
+  flex-direction: column;
+  padding: 14px 16px 16px;
+  border-radius: 10px;
+  background: var(--ss-surface);
+  box-shadow: var(--ss-shadow-card);
+  font-size: 12px;
+  line-height: 1.3;
+  color: var(--ss-text);
+
+  .aw-tile__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    height: 20px;
+  }
+
+  .aw-tile__agent {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ss-text-strong);
+  }
+
+  .aw-tile__sub {
+    margin-top: 4px;
+    color: var(--ss-text-faint);
+  }
+
+  .aw-tile__module {
+    display: block;
+    margin-top: 14px;
+  }
+
+  /* Swap sizes its content to max-content; the steps bar spans the tile */
+  .aw-tile__module > .ss-swap__in,
+  .aw-tile__module > .ss-swap__out {
+    width: 100%;
+  }
+
+  /* Only a real swap fades: what is on screen at load is already there */
+  .aw-tile__module:not(:has(> .ss-swap__out)) > .ss-swap__in {
+    animation-name: none;
+  }
+
+  .aw-tile__title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ss-text-strong);
+  }
+
+  .aw-tile__blurb {
+    margin-top: 3px;
+    color: var(--ss-text);
+    white-space: nowrap;
+  }
+
+  .aw-tile__blurb[data-empty] {
+    color: var(--ss-text-faint);
+  }
+
+  .aw-tile__steps {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 14px;
+  }
+
+  .aw-tile__segments {
+    display: flex;
+    flex: 1;
+    gap: 4px;
+  }
+
+  .aw-tile__segment {
+    flex: 1;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--ss-ink-1);
+    transition: background-color 0.5s ease;
+  }
+
+  .aw-tile__segment[data-done] {
+    background: var(--ss-accent);
+  }
+
+  .aw-tile__segment[data-failed] {
+    background: var(--ss-danger);
+  }
+
+  .aw-tile__steps-label {
+    flex: none;
+    font-size: 11px;
+    color: var(--ss-text-faint);
+  }
+
+  .aw-tile__metric {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 16px;
+  }
+
+  .aw-tile__value {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .aw-tile__metric-name {
+    font-size: 11px;
+    color: var(--ss-text-faint);
+  }
+
+  .aw-tile__number {
+    display: block;
+    height: 28px;
+    font-size: 22px;
+    line-height: 28px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--ss-text-strong);
+    --ss-count-unit-gap: 0.25em;
+  }
+
+  .aw-tile__number .ss-count__unit {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--ss-text-faint);
+  }
+
+  .aw-tile__target {
+    margin-bottom: 4px;
+    font-size: 11px;
+    color: var(--ss-text-faint);
+    transition: color 0.35s ease;
+  }
+
+  .aw-tile__target[data-met] {
+    color: var(--ss-success-text);
+    font-weight: 500;
+  }
+
+  .aw-tile__attempts {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    height: 20px;
+    margin-top: 10px;
+  }
+
+  .aw-tile__dots {
+    display: flex;
+    gap: 6px;
+  }
+
+  .aw-tile__none {
+    font-size: 11px;
+    color: var(--ss-text-faint);
+  }
+
+  .aw-tile__dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    box-sizing: border-box;
+  }
+
+  .aw-tile__dot[data-fresh] {
+    animation: aw-dot-in 0.5s cubic-bezier(0.25, 0.8, 0.25, 1) both;
+  }
+
+  .aw-tile__dot[data-v='win'] {
+    background: var(--ss-accent);
+  }
+
+  .aw-tile__dot[data-v='flat'] {
+    border: 1.5px solid var(--ss-text-faint);
+  }
+
+  .aw-tile__dot[data-v='fail'] {
+    background: var(--ss-danger);
+  }
+
+  .aw-tile__streak-wrap {
+    flex: none;
+  }
+
+  .aw-tile__streak {
+    display: inline-flex;
+    align-items: center;
+    height: 20px;
+    padding: 0 8px;
+    border-radius: var(--ss-radius-pill);
+    background: var(--ss-success-soft);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--ss-success-text);
+    white-space: nowrap;
+  }
+
+  .aw-tile__time {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 10px;
+  }
+
+  .aw-tile__meter {
+    flex: 1;
+    height: 4px;
+  }
+
+  .aw-tile__time-label {
+    flex: none;
+    min-width: 72px;
+    text-align: right;
+    font-size: 11px;
+    color: var(--ss-text-faint);
+  }
+
+  .aw-tile__job {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 16px;
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--ss-text-faint);
+    opacity: 0;
+    transition: opacity 0.3s ease;
+  }
+
+  .aw-tile__job[data-on] {
+    opacity: 1;
+  }
+
+  .aw-tile__job-mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 11px;
+    height: 11px;
+    flex: none;
+  }
+
+  .aw-tile__flag {
+    margin-top: 12px;
+    padding: 7px 10px;
+    border-radius: 7px;
+    background: var(--ss-warning-soft);
+    font-size: 11px;
+    line-height: 1.35;
+    color: var(--ss-warning-text);
+  }
+
+  &.aw-tile--filler .aw-tile__module {
+    display: flex;
+    flex-direction: column;
+  }
+}
+
+@keyframes aw-dot-in {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+}

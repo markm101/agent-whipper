@@ -1,0 +1,221 @@
+.ck {
+  .ck-stack {
+    position: relative;
+    height: 240px;
+  }
+
+  .ck-card {
+    position: absolute;
+    inset: 0;
+    padding: 14px 16px;
+    opacity: 0;
+    transition: opacity 0.6s ease;
+  }
+
+  .ck-card[data-on] {
+    opacity: 1;
+  }
+
+  .ck-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 22px;
+  }
+
+  .ck-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ss-text-strong);
+  }
+
+  .ck-note {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--ss-text-faint);
+  }
+
+  .ck-plot {
+    position: relative;
+    height: 180px;
+    margin: 4px -16px 0;
+  }
+
+  .ck-track,
+  .ck-elapsed,
+  .ck-wait,
+  .ck-ext,
+  .ck-grace {
+    position: absolute;
+    top: 96px;
+    height: 10px;
+    border-radius: 5px;
+  }
+
+  .ck-track {
+    background: var(--ss-ink-1);
+  }
+
+  .ck-elapsed {
+    background: var(--ss-accent);
+    transition: width 1s linear;
+  }
+
+  .ck-wait {
+    z-index: 1;
+    border-radius: 0;
+    background: repeating-linear-gradient(135deg, var(--ss-ink-5) 0 3px, var(--ss-surface) 3px 7px);
+    box-shadow: inset 0 0 0 1px var(--ss-ink-4);
+    animation: ck-in 0.5s ease both;
+  }
+
+  .ck-ext {
+    z-index: 0;
+    border-radius: 0;
+    background: var(--ss-success-soft);
+    box-shadow: inset 0 0 0 1px var(--ss-success);
+    animation: ck-in 0.6s cubic-bezier(0.25, 0.8, 0.25, 1) both;
+  }
+
+  .ck-ext-label {
+    position: absolute;
+    top: 74px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ss-success-text);
+    transform: translateX(-50%);
+    animation: ck-in 0.6s ease both;
+  }
+
+  .ck-grace {
+    z-index: 1;
+    border-radius: 0;
+    z-index: 2;
+    background: color-mix(in srgb, var(--ss-warning) 60%, var(--ss-surface));
+    opacity: 0;
+    transition: opacity 0.4s ease;
+  }
+
+  .ck-grace[data-on] {
+    opacity: 1;
+  }
+
+  .ck-under {
+    position: absolute;
+    top: 142px;
+    font-size: 11px;
+    color: var(--ss-text-faint);
+    white-space: nowrap;
+    transform: translateX(-50%);
+    animation: ck-in 0.5s ease both;
+  }
+
+  .ck-under--grace {
+    color: var(--ss-warning-text);
+    opacity: 0;
+    animation: none;
+    transition: opacity 0.4s ease;
+  }
+
+  .ck-under--grace[data-on] {
+    opacity: 1;
+  }
+
+  .ck-deadline {
+    position: absolute;
+    top: 50px;
+    width: 0;
+    height: 60px;
+    border-left: 2px solid var(--ss-ink-5);
+    margin-left: -1px;
+    transition: left 0.7s cubic-bezier(0.45, 0, 0.1, 1);
+  }
+
+  .ck-deadline__label {
+    position: absolute;
+    top: -22px;
+    left: 0;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--ss-text-strong);
+    white-space: nowrap;
+    transform: translateX(-50%);
+  }
+
+  .ck-deadline__label[data-end] {
+    transform: translateX(calc(-100% + 8px));
+  }
+
+  & .ss-stage[data-layout='compact'] {
+    --gutter: 16px;
+  }
+
+  & .ss-stage[data-layout='compact'] .aw-app {
+    padding: 14px 14px 0;
+  }
+
+  & .ss-stage[data-layout='compact'] .aw-app__meta {
+    display: none;
+  }
+
+  & .ss-stage[data-layout='compact'] .ck-stack {
+    height: 270px;
+  }
+
+  & .ss-stage[data-layout='compact'] .ck-head {
+    flex-wrap: wrap;
+    height: auto;
+    row-gap: 6px;
+  }
+
+  & .ss-stage[data-layout='compact'] .ck-note {
+    flex-basis: 100%;
+    margin-left: 0;
+  }
+
+  .ck-dot {
+    position: absolute;
+    top: 80px;
+    width: 8px;
+    height: 8px;
+    margin-left: -4px;
+    border-radius: 50%;
+    box-sizing: border-box;
+    animation: ck-dot-in 0.45s cubic-bezier(0.25, 0.8, 0.25, 1) both;
+  }
+
+  .ck-dot[data-v='win'] {
+    background: var(--ss-accent);
+  }
+
+  .ck-dot[data-v='step'] {
+    border-radius: 2px;
+    border: 1.5px solid var(--ss-accent);
+  }
+
+  .ck-dot[data-v='flat'] {
+    border: 1.5px solid var(--ss-text-faint);
+  }
+
+  .ck-tick {
+    position: absolute;
+    top: 116px;
+    font-size: 11px;
+    color: var(--ss-text-faint);
+    font-variant-numeric: tabular-nums;
+    transform: translateX(-50%);
+  }
+}
+
+@keyframes ck-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes ck-dot-in {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+}
