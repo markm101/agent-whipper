@@ -1,7 +1,7 @@
 // What the server sends: the records turned into the Board and AttemptDetail
 // of src/shared/api.ts, the plain-text board lines, and the small answers to
 // an agent's GET calls. Read-only; settle the world first.
-import type { Agent, AgentId, Attempt, AttemptDetail, AttemptId, Board, ChangeId, Clock, Commit, Iso, JobId, Module, ModuleId, ModuleStatus, ProjectResult, Verdict } from '../../shared/api.ts'
+import type { Agent, AgentId, Attempt, AttemptDetail, AttemptId, Board, ChangeId, Clock, Commit, Goal, Iso, JobId, Module, ModuleId, ModuleStatus, ProjectResult, Verdict } from '../../shared/api.ts'
 import { judge } from './judge.ts'
 import { boardLine } from '../../shared/boardLine.ts'
 import { currentOf, factsOf, failedTurns, firstInLine, locate, measured, verifiersOf, type Facts } from './queries.ts'
@@ -116,6 +116,33 @@ export function agentView(a: AgentRec, now: Ms): Agent {
 
 export function boardOf(w: World, now: Ms): Board {
   return { generatedAt: iso(now), agents: w.agents.map((a) => agentView(a, now)) }
+}
+
+/** GET /agents/{id}/project: the agent's project in brief, so an agent can find its modules and a verifier agent the ones waiting for verifiers. */
+export interface AgentProject {
+  title: string
+  /** Null once the project has ended. */
+  current: ModuleId | null
+  /** `failed`: frozen, but the baseline job failed on them, so the module waits for a change request. */
+  modules: { id: ModuleId; position: number; title: string; status: ModuleStatus; steps: string[]; goal: Goal; verifiers: 'missing' | 'frozen' | 'failed'; openChanges: number }[]
+  /** Titles of the agent's projects waiting to start. */
+  queued: string[]
+}
+
+export function agentProjectOf(a: AgentRec, now: Ms): AgentProject | null {
+  const { project: p, queued } = agentView(a, now)
+  if (!p) return null
+  const modules = p.modules.map((m) => ({
+    id: m.id,
+    position: m.position,
+    title: m.title,
+    status: m.status,
+    steps: m.steps.map((s) => s.title),
+    goal: m.goal,
+    verifiers: m.verifiers.kind === 'frozen' && m.status.state === 'pending' && m.status.waitingFor === 'verifiers' ? ('failed' as const) : m.verifiers.kind,
+    openChanges: m.verifiers.kind === 'frozen' ? m.verifiers.openChanges : 0,
+  }))
+  return { title: p.title, current: p.current, modules, queued }
 }
 
 /** GET /board: every agent's board line. */

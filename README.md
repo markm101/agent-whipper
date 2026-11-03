@@ -2,88 +2,239 @@
 
 # Agent Whipper
 
-Agent Whipper keeps long-running AI coding agents on track overnight. Each agent splits its hill climb into modules and steps, submits every attempt as a commit, and keeps a one-sentence blurb current. A runner measures each attempt with frozen tests and a benchmark the agent can't change, and the server judges it. A module that fails a step, misses its target, or runs out of time becomes stuck, and the agent moves on to another approach. A module that keeps winning earns more time. [`DESIGN.md`](DESIGN.md) has the full rules.
+Agent Whipper keeps long-running AI coding agents on track overnight. Each agent splits its hill climb into modules and steps, submits every attempt as a commit, and keeps a one-sentence blurb current. A runner measures each attempt with frozen tests and a benchmark the agent can't change, and the server judges it. A module that fails a step, misses its target, or runs out of time becomes stuck, and the agent moves on to another approach. A module that keeps winning earns more time.
+
+![The board: a tile per agent with its module, metric, target, and blurb](assets/dashboard-board.png)
 
 Created in [T3 Code](https://t3.codes).
 
-## Run it
+## How it works
 
-You need Docker with Compose, on a home machine or a VPS.
+1. **You connect a checkout to an agent.** The agent plans a project: one hill climb, split into modules. Each module is one approach with a goal, such as "p95 latency 10% lower", and ordered steps.
+2. **A verifier agent writes the tests and benchmark** for each module, in its own session. They freeze when submitted, so the agent that climbs can't change them.
+3. **The agent commits each attempt and posts its hash.** It never reports a number.
+4. **A runner measures the attempt** in a container with no network. It runs the tests on the new commit, then the benchmark on it and on the best commit, taking turns.
+5. **The server judges the attempt.**
+   - A win moves the best commit and can earn more time.
+   - A flat keeps the work but not the credit.
+   - A fail sends the agent back.
 
-1. Copy `.env.example` to `.env` and set the three tokens to different random strings, such as the output of `openssl rand -hex 24`.
-2. Start both services:
+   Three failed turns on one step, a target missed after the last step, or running out of time makes the module stuck. The agent then abandons it with a sentence naming the assumption that failed.
+6. **A hook shows the agent its board line** before each model request, so it always knows its module, step, goal, and time left:
 
-   ```sh
-   docker compose up -d --build
+   ```
+   agent 1: Project: search-perf, Module (2 / 5): query cache, Progress: 1 / 3, Blurb: Caching parsed queries. Goal: p95 latency 371 -> 334 ms, 10% lower. Best so far 352 ms. 38 min left.
    ```
 
-3. Open `http://127.0.0.1:8080` and sign in with any user name and the admin token as the password.
+You watch it all on the dashboard, and approve or reject the verifier changes agents ask for. [`DESIGN.md`](DESIGN.md) has the full rules.
 
-`whip-server` serves the API, the dashboard, and the SQLite database, which lives in the `whip-data` volume. `whip-runner` claims jobs and runs each one in a throwaway container with no network, no tokens, and no Docker socket. Commits have to be in a git remote the runner can reach: set a project's `repo`, set `WHIP_REPO`, or put bare repos in `./repos` and use `file:///repos/<name>.git`.
+## Quick start
 
-To reach the server from other machines, put it behind a TLS proxy and set `WHIP_BIND=0.0.0.0`. A runner on another machine, such as one with a GPU, runs the same image with `WHIP_URL` pointing at the server and `WHIP_LABELS=gpu`.
+You need git and Docker with the Compose plugin, on a home machine or a VPS. The first build downloads the Node and Docker CLI images, a few hundred MB.
 
-## Point the agents at it
+```sh
+git clone https://github.com/markm101/agent-whipper.git
+cd agent-whipper
+sh scripts/setup.sh
+```
 
-Give each agent the instructions in [`docs/agent-guide.md`](docs/agent-guide.md), with its agent ID, the server's address, and the agent token.
+`setup.sh` writes `.env` with three new tokens, then builds and starts the two services. It ends by printing where the dashboard is:
 
-`scripts/whip-hook.sh` prints the agent's board line for a hook to add to its context. It needs `WHIP_URL`, `WHIP_AGENT_ID`, and `WHIP_AGENT_TOKEN`, and if the server is down it says so and lets the agent continue. With no argument it prints plain text, which reaches the model only from `SessionStart` and `UserPromptSubmit`. Give it the event's name and it prints the JSON every other event needs, `hookSpecificOutput.additionalContext`.
+```
+Agent Whipper is running.
 
-In Claude Code, add it to `.claude/settings.json`. `UserPromptSubmit` shows the line with each prompt, and `PostToolBatch` shows it again after each round of tool calls, so the agent sees it before every model request of a long autonomous run:
+  Dashboard     http://127.0.0.1:8080
+  Admin token   3f9c0e…
+```
+
+Open the dashboard and paste the admin token to sign in. The browser stays signed in for 30 days. To see the token again, run `grep ADMIN .env`.
+
+Run `setup.sh` again whenever you like, such as after a `git pull`. It keeps `.env`, the database, and the repos, and rebuilds the images.
+
+## Connect a project
+
+### 1. Connect the checkout
+
+Pick the checkout the agent will work in, and give the agent an ID, such as `1`:
+
+```sh
+sh scripts/connect.sh ~/code/search 1
+```
+
+| It sets up | Where | For |
+|---|---|---|
+| A bare copy of the repo | `repos/search.git` in this folder. The runner sees it as `file:///repos/search.git` | The runner fetches the agent's commits from it |
+| The remote `whip` | The checkout, pointing at that copy | The agent pushes each attempt there |
+| `.whip/env` | The checkout | The server's address, the agent's ID and token, and the repo's address for the runner |
+| `.whip/hook.sh` and `.whip/guide.md` | The checkout | The board line hook, and the agent's instructions |
+| `.claude/settings.local.json` and `.codex/hooks.json` | The checkout, unless they exist | The hooks for Claude Code and for Codex |
+
+Git ignores every file it writes, through the repo's `.git/info/exclude`, so the token never lands in a commit.
+
+Give each agent a checkout of its own. Agents on the same repo share its bare copy. If an agent works in a git worktree, as T3 Code makes for a thread, connect that worktree.
+
+`connect.sh` then prints the agent's board line, which shows the hook can reach the server, and the two prompts below with your values filled in.
+
+### 2. Start the agent
+
+Start Claude Code or Codex in the checkout, with a prompt that names your goal:
+
+```
+You're agent 1 on Agent Whipper. Read .whip/guide.md and follow it.
+Your goal: make search queries faster, as p95 latency over the benchmark
+queries shows. Plan the climb as a project starting from commit
+3f2a9c1e8d0b4a6f7c5e2d1b9a8f7e6d5c4b3a21, with repo file:///repos/search.git.
+```
+
+The agent creates a project, and its modules wait for verifiers.
+
+### 3. Start the verifier
+
+Start a second session in a folder of its own, so the agent doesn't commit the verifier's files:
+
+```
+You write the verifiers for agent 1 on Agent Whipper. Load the settings
+with . ~/code/search/.whip/env and read ~/code/search/.whip/guide.md, the
+part "If you write the verifiers" above all. Every few minutes, list the
+modules with curl -sS "$W/agents/$ID/project" -H "$AUTH". Freeze verifiers
+for each one whose "verifiers" is "missing", and file a change request for
+each one whose "verifiers" is "failed", until the project ends.
+```
+
+Once a module has verifiers, the runner measures its baseline, and the module starts.
+
+### 4. Watch the dashboard
+
+The board shows a tile for each agent: its current module, the metric against its target, and its blurb. Open an agent to see its board line, modules, steps, attempts, and clock. Open an attempt to see each run the runner measured.
+
+The dashboard also flags anything that needs a look:
+
+- a commit that touches verifier files
+- an attempt that runs fewer tests, or does less work per run
+- verifiers written by the agent that works the module
+- a baseline that failed
+
+An agent that finds a frozen verifier wrong files a change request. It appears on the agent's page. **Review** shows the diff, and you approve or reject it with an optional note for the agent. Until you decide, the module keeps running on the old verifiers.
+
+![An agent's page: its board line and every module, with why each abandoned one failed](assets/dashboard-agent.png)
+
+## Configuration
+
+`.env` holds the settings. After you change it, run `sh scripts/setup.sh` or `docker compose up -d`.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `WHIP_AGENT_TOKEN`, `WHIP_RUNNER_TOKEN`, `WHIP_ADMIN_TOKEN` | Set by `setup.sh` | Three different random strings of at least 16 characters. Agents use the agent token, runners the runner token, and you the admin token |
+| `WHIP_BIND` | `127.0.0.1` | The host address whip-server listens on |
+| `WHIP_PORT` | `8080` | The host port |
+| `WHIP_DEFAULT_MAX_MINUTES` | `90` | A module's time limit when its plan sets none |
+| `WHIP_MAX_MINUTES_CEILING` | `120` | The most a plan can set. Extensions come on top |
+| `WHIP_LEASE_MINUTES` | `2` | How long a job stays with a runner that stops renewing it before another runner can take it |
+| `WHIP_RUNNER_NAME` | `runner-1` | The runner's name on the dashboard |
+| `WHIP_LABELS` | `cpu` | The hardware the runner has, such as `cpu,gpu`. A job goes to a runner with its verifiers' `hardware` label |
+| `WHIP_REPO` | None | The remote for projects that name no `repo` |
+| `WHIP_REPOS` | `./repos` | The host folder of bare repos, which the runner mounts read-only at `/repos` |
+| `WHIP_CPUSET` | None | Pins job containers to these cores, such as `2-5`, for steadier benchmarks |
+| `WHIP_MEMORY` | None | A memory limit for each job container, such as `4g` |
+
+If you change a token, run `connect.sh` again on each checkout to update its `.whip/env`.
+
+## Run it on a server, or add runners
+
+**Reach it from other machines.** Keep `WHIP_BIND=127.0.0.1`, and put a TLS proxy on the same machine in front of it. With [Caddy](https://caddyserver.com), that's a Caddyfile of:
+
+```
+whip.example.com {
+	reverse_proxy 127.0.0.1:8080
+}
+```
+
+The dashboard's cookie is marked `Secure` once the proxy says the request came over HTTPS, as Caddy does.
+
+**Agents on other machines.** `connect.sh` expects the checkout on the machine that runs the runner, because the agent pushes to the bare copy in a local folder. An agent elsewhere needs a remote that both it and the runner can reach. The runner fetches without credentials, so that's a public repo or a git server on your network. Name that remote as the project's `repo`, and push to it. For the agent's `.whip/`, connect a checkout on the server with `--url https://whip.example.com`, copy its `.whip/` to the agent's checkout, and set `REPO` in `.whip/env` to that remote.
+
+**More runners,** such as one with a GPU. Clone this repo on that machine, build the runner image, and start it against the server:
+
+```sh
+docker build --target runner -t whip-runner .
+docker run -d --restart unless-stopped --name whip-runner \
+  -e WHIP_URL=https://whip.example.com -e WHIP_RUNNER_TOKEN=<runner token> \
+  -e WHIP_RUNNER_NAME=gpu-1 -e WHIP_LABELS=gpu \
+  -v /var/run/docker.sock:/var/run/docker.sock -v whip-work:/work whip-runner
+```
+
+A `gpu` job gets the machine's GPUs (`--gpus all`), which takes the NVIDIA Container Toolkit.
+
+## Day to day
+
+```sh
+docker compose ps                     # are both services up?
+docker compose logs -f whip-runner    # the jobs it claims and finishes
+docker compose stop                   # the runner drops its job, which runs again after start
+docker compose start
+sh scripts/setup.sh                   # after git pull: rebuild and restart
+```
+
+The database lives in the `whip-data` volume. To back it up, stop the server and copy the database out:
+
+```sh
+docker compose stop whip-server
+docker compose cp whip-server:/data/whip.db ./whip-backup.db
+docker compose start whip-server
+```
+
+To restore a backup, copy it back the same way, into `whip-server:/data/whip.db`. `docker compose down -v` deletes the database and the runner's cache for good.
+
+## Troubleshooting
+
+- **The sign-in page says the token is wrong.** The dashboard takes the admin token, `WHIP_ADMIN_TOKEN` in `.env`. If you paste another token, the page says which one it was.
+- **A module is "Waiting for its verifiers."** No verifiers have been submitted for it yet. Start the verifier session, step 3 above.
+- **A module says "Its baseline failed on its verifiers."** The tests failed on the start commit, or the benchmark printed no value. The module's flag on the dashboard says which. The verifier fixes it with a change request, and you approve it on the agent's page.
+- **An attempt fails because the runner can't fetch its commit.** The agent didn't push the commit. It needs `git push -q whip "HEAD:refs/whip/$(git rev-parse HEAD)"` before posting.
+- **The hook says "whip-server didn't answer."** Check `docker compose ps`, and check `WHIP_URL` in the checkout's `.whip/env`.
+- **The hook says "whip-server answered 401."** The agent token changed. Run `connect.sh` on the checkout again.
+- **Jobs stay queued.** Check `docker compose logs whip-runner`. A job waits for a runner whose `WHIP_LABELS` includes its verifiers' `hardware`.
+- **Codex doesn't show the board line.** Codex runs a hook only once you trust it. See below.
+- **`connect.sh` says `repos` isn't writable.** Docker created the folder as root, which happens when Compose starts before `setup.sh` has run. Run `sudo chown $(id -un) repos`.
+- **`setup.sh` can't start the services.** If the port is taken, set `WHIP_PORT` in `.env`. Otherwise, `docker compose logs` shows why.
+
+## The hooks
+
+`connect.sh` writes the hooks for you. This is what it writes, in case you need to merge them into settings that already exist.
+
+`.whip/hook.sh` prints the agent's board line. It reads `.whip/env`, the file beside it, or `WHIP_URL`, `WHIP_AGENT_ID`, and `WHIP_AGENT_TOKEN` from the environment. If the server is down, it says so and lets the agent carry on.
+
+With no argument, the hook prints plain text, which reaches the model only from `SessionStart` and `UserPromptSubmit`. Give it the event's name and it prints the JSON every other event needs, `hookSpecificOutput.additionalContext`.
+
+In Claude Code, the hooks go in `.claude/settings.local.json`. `UserPromptSubmit` shows the line with each prompt, and `PostToolBatch` shows it again after each round of tool calls, so the agent sees it before every model request of a long autonomous run:
 
 ```json
 {
   "hooks": {
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "sh scripts/whip-hook.sh" }] }],
-    "PostToolBatch": [{ "hooks": [{ "type": "command", "command": "sh scripts/whip-hook.sh PostToolBatch" }] }]
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "sh \"$CLAUDE_PROJECT_DIR/.whip/hook.sh\"" }] }],
+    "PostToolBatch": [{ "hooks": [{ "type": "command", "command": "sh \"$CLAUDE_PROJECT_DIR/.whip/hook.sh\" PostToolBatch" }] }]
   }
 }
 ```
 
-In Codex, add it to `.codex/hooks.json`. Codex has no batch event, so `PostToolUse` shows the line after each tool call, once per call when calls run in parallel:
+In Codex, they go in `.codex/hooks.json`. Codex has no batch event, so `PostToolUse` shows the line after each tool call, once per call when calls run in parallel:
 
 ```json
 {
   "hooks": {
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "sh scripts/whip-hook.sh" }] }],
-    "PostToolUse": [{ "hooks": [{ "type": "command", "command": "sh scripts/whip-hook.sh PostToolUse" }] }]
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "sh .whip/hook.sh" }] }],
+    "PostToolUse": [{ "hooks": [{ "type": "command", "command": "sh .whip/hook.sh PostToolUse" }] }]
   }
 }
 ```
 
-Codex runs a hook only once it's trusted, and `codex exec` skips untrusted hooks without a warning. Review them in the interactive `codex`, or pass `--dangerously-bypass-hook-trust` to `codex exec`.
+Codex runs a hook only once you trust it, and `codex exec` skips untrusted hooks without a warning. Review the hooks in the interactive `codex`, or pass `--dangerously-bypass-hook-trust` to `codex exec`.
 
-These choices come from runs of more than 20 tool calls on Claude Code 2.1.314 and Codex CLI 0.165.0. `PreToolUse` and `PostToolUse` also reach the model in both, but only as JSON, and Claude Code's `PostToolUse` fires once per call where `PostToolBatch` fires once per round. Codex's `PreModelRequest` fires before every model request, but Codex drops its output.
+These choices come from runs of more than 20 tool calls on Claude Code 2.1.314 and Codex CLI 0.165.0. `PreToolUse` and `PostToolUse` also reach the model in both tools, but only as JSON, and Claude Code's `PostToolUse` fires once per call, where `PostToolBatch` fires once per round. Codex's `PreModelRequest` fires before every model request, but Codex drops its output.
 
 ## The API
 
-Agent calls take the agent token, runner calls the runner token, and dashboard actions the admin token, each as `Authorization: Bearer <token>`. Bodies are JSON (`content-type: application/json`), and the blurb also takes `text/plain`. Commits are named by their full hash. Rejections come back as `{"error": "<code>", "message": "<sentence>"}`: 400 for a request that can never succeed, 404 for something missing, and 409 for one that doesn't fit the current state.
-
-| Call | Token | What it does |
-|---|---|---|
-| `POST /agents/{id}/projects` | agent | Creates a project, or queues it while another is open |
-| `PUT /agents/{id}/blurb` | agent | Sets the agent's sentence |
-| `POST /agents/{id}/modules` | agent | Adds a module right after the current one |
-| `POST /agents/{id}/modules/{m}/verifiers` | agent | Submits and freezes a module's verifiers |
-| `POST /agents/{id}/modules/{m}/verifiers/changes` | agent | Files a change request |
-| `GET /agents/{id}/modules/{m}` | agent | Reads a module whole, with its verifiers' commands and files |
-| `GET /agents/{id}/modules/{m}/verifiers/changes` | agent | Lists the module's change requests |
-| `GET /agents/{id}/modules/{m}/verifiers/changes/{change}` | agent | Reads a change request and the admin's note |
-| `POST /agents/{id}/modules/{m}/attempts` | agent | Queues an attempt |
-| `GET /agents/{id}/modules/{m}/attempts/{attemptId}` | agent | Reads an attempt's job, verdict with its numbers and why, failed turns, streak, and module state |
-| `POST /agents/{id}/modules/{m}/steps/{n}/done` | agent | Queues a step check |
-| `GET /agents/{id}/modules/{m}/steps/{n}` | agent | Reads a step and what its latest check found |
-| `POST /agents/{id}/modules/{m}/abandon` | agent | Abandons a module, with a follow-up if it has a win |
-| `GET /agents/{id}` | agent | The agent's board line, as plain text |
-| `GET /board` | agent or admin | Every board line |
-| `GET /api/board`, `GET /api/agents/{id}/modules/{m}/attempts/{a}` | admin | The dashboard's data |
-| `GET /admin/changes/{change}` | admin | A change request with each changed file before and after |
-| `POST /admin/changes/{change}` | admin | Approves or rejects a change request: `{"approve": true, "note": "…"}` |
-| `PUT /admin/agents/{id}/modules/{m}/verifiers` | admin | Replaces a module's verifiers |
-| `GET /admin/verifiers/{hash}` | admin | A frozen verifier set's files |
-| `POST /jobs/claim`, `POST /jobs/{job}/lease`, `POST /jobs/{job}/results` | runner | Claim a job, renew its lease, send its results |
-
-A browser that asks for a page gets the dashboard instead, so `/agents/1` is a page in a browser and the board line for `curl`.
+Agents call the API with `curl`, and [`docs/agent-guide.md`](docs/agent-guide.md) shows them how. [`docs/api.md`](docs/api.md) lists every call, with the token it takes.
 
 ## Develop
 
@@ -91,17 +242,18 @@ Node 26 runs the TypeScript sources directly.
 
 ```sh
 npm install
-npm test            # domain, HTTP, runner (Docker part needs busybox:1.37), dashboard
+npm test            # domain, HTTP, hook, runner (its Docker part needs busybox:1.37), dashboard
 npm run typecheck
-npm run dev         # the dashboard on the mock data, at http://127.0.0.1:5320
+npm run dev         # the dashboard on mock data, at http://127.0.0.1:5320
 ```
 
 | Folder | What's in it |
 |---|---|
-| `src/server/domain` | The rules: records, the lifecycle table, commands, the judge, and the board view. No I/O, so the dashboard's mock runs the same code |
-| `src/server` | The SQLite store, the HTTP API, and `main.ts` |
+| `src/server/domain` | The rules: records, the lifecycle table, commands, the judge, and the board view. There's no I/O, so the dashboard's mock runs the same code |
+| `src/server` | The SQLite store, the HTTP API, the sign-in, and `main.ts` |
 | `src/runner` | Checkouts, the Docker and local executors, and the job loop |
 | `src/dashboard` | The React dashboard. `VITE_DATA=mock` builds it on scripted demo data, as the hosted demo does |
 | `src/shared` | The contract between the server and the dashboard, and the board line |
+| `scripts` | `setup.sh`, `connect.sh`, the hook, and `shoot.mjs`, which screenshots dashboard pages |
 
-To run the services without Docker, set the tokens and start `npm run server`, then `WHIP_URL=http://127.0.0.1:8080 npm run runner`. `npm run build:demo` builds the dashboard on the mock data for static hosting.
+To run the services without Docker, set the three tokens and run `npm run build && npm run server`, then `WHIP_URL=http://127.0.0.1:8080 npm run runner`. `npm run build:demo` builds the dashboard on mock data for static hosting.

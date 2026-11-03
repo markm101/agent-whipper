@@ -99,6 +99,12 @@ test('says when time is up and one attempt is left', () => {
 test('names what a stuck or pending module is waiting for', () => {
   assert.match(boardLine(agentWith(moduleWith({ status: { state: 'stuck', cause: 'step' }, clock: { kind: 'stopped', startedAt: null, at: iso('2026-11-03T02:00:00Z'), maxMinutes: 90, extensions: [], waits: [], waitedMinutes: 0 } })), now), /Stuck, waiting for an abandon reason\.$/)
   assert.match(boardLine(agentWith(moduleWith({ status: { state: 'pending', waitingFor: 'verifiers' }, clock: { kind: 'notStarted' } })), now), /Waiting for its verifiers\.$/)
+  const frozen = { kind: 'frozen' as const, hash: 'abc', tests: 1, author: 'verifier', hardware: 'cpu', openChanges: 0 }
+  assert.match(
+    boardLine(agentWith(moduleWith({ status: { state: 'pending', waitingFor: 'verifiers' }, verifiers: frozen, clock: { kind: 'notStarted' } })), now),
+    /Its baseline failed on its verifiers, so it waits for an approved change request\.$/,
+    'frozen verifiers it still waits for are ones its baseline failed on',
+  )
 })
 
 test('an agent with no open project says so', () => {

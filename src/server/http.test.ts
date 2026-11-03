@@ -69,10 +69,10 @@ test('agents, runners and the admin drive a module through HTTP, and the data su
   // Tokens
   const anonymous = await s.call('GET', '/api/board', { token: null })
   assert.equal(anonymous.status, 401)
-  assert.match(anonymous.headers.get('www-authenticate') ?? '', /^Basic /, 'a browser resends the admin password it gave for the page')
-  // The browser's fetch carries the admin password as Basic auth
-  const viaBrowser = await s.call('GET', '/api/board', { token: null, headers: { authorization: `Basic ${Buffer.from(`me:${TOKENS.admin}`).toString('base64')}` } })
-  assert.equal(viaBrowser.status, 200)
+  assert.equal(anonymous.headers.get('www-authenticate'), null, 'no browser password prompt: the dashboard has its own sign-in page')
+  // curl -u takes a token as the Basic password
+  const viaBasic = await s.call('GET', '/api/board', { token: null, headers: { authorization: `Basic ${Buffer.from(`me:${TOKENS.admin}`).toString('base64')}` } })
+  assert.equal(viaBasic.status, 200)
   assert.equal((await s.call('POST', '/jobs/claim', { body: { runner: 'r1', labels: ['cpu'] } })).status, 403)
   assert.equal((await s.call('GET', '/api/board', { token: 'agent' })).status, 403)
   assert.equal((await s.call('GET', '/healthz', { token: null })).text, 'ok\n')
@@ -86,11 +86,19 @@ test('agents, runners and the admin drive a module through HTTP, and the data su
   assert.equal(tooBold.json.error, 'badSpec')
   assert.equal((await s.call('PUT', '/agents/1/blurb', { body: 'Caching parsed queries.' })).status, 200)
 
+  // The project in brief, where a verifier agent finds the modules that need verifiers
+  const brief = await s.call('GET', '/agents/1/project')
+  assert.deepEqual([brief.json.title, brief.json.current, brief.json.queued], ['search-perf', 'm1', []])
+  assert.deepEqual(brief.json.modules.map((m: { id: string; verifiers: string; steps: string[]; status: unknown }) => [m.id, m.verifiers, m.steps, m.status]), [['m1', 'missing', ['Cache parsed queries'], { state: 'pending', waitingFor: 'verifiers' }]])
+  const none = await s.call('GET', '/agents/9/project')
+  assert.deepEqual([none.status, none.json.message], [404, 'There is no project for agent 9. Create one with POST /agents/9/projects.'])
+
   const badPath = await s.call('POST', '/agents/1/modules/m1/verifiers', { body: { ...VERIFIERS, files: { '../escape.sh': 'x' } } })
   assert.equal(badPath.status, 400)
   const frozen = await s.call('POST', '/agents/1/modules/m1/verifiers', { body: VERIFIERS })
   assert.equal(frozen.status, 200)
   assert.match(frozen.json.hash, /^[0-9a-f]{16}$/)
+  assert.equal((await s.call('GET', '/agents/1/project')).json.modules[0].verifiers, 'frozen')
 
   // The baseline job, with the frozen files and the project's remote
   const claim = await s.call('POST', '/jobs/claim', { token: 'runner', body: { runner: 'r1', labels: ['cpu'] } })
@@ -131,16 +139,36 @@ test('agents, runners and the admin drive a module through HTTP, and the data su
   assert.equal(detail.json.runs.length, 10)
   assert.equal(detail.json.runner, 'r1')
 
-  // A browser gets the dashboard, with the admin token as the Basic password
+  // A browser without the cookie gets the sign-in page, which trades the admin token for it
   const html = { accept: 'text/html' }
-  assert.equal((await s.call('GET', '/agents/1', { token: null, headers: html })).status, 401)
-  const basic = `Basic ${Buffer.from(`me:${TOKENS.admin}`).toString('base64')}`
-  const page = await s.call('GET', '/agents/1', { token: null, headers: { ...html, authorization: basic } })
+  const signin = await s.call('GET', '/agents/1', { token: null, headers: html })
+  assert.deepEqual([signin.status, signin.headers.get('www-authenticate')], [401, null])
+  assert.match(signin.text, /<title>Sign in · Agent Whipper/)
+  assert.equal((await s.call('GET', '/assets/app.js', { token: null })).status, 401)
+  const wrong = await s.call('POST', '/signin', { token: null, body: { token: TOKENS.agent } })
+  assert.deepEqual([wrong.status, wrong.json.message], [401, "That's the agent token. The dashboard takes the admin token, WHIP_ADMIN_TOKEN."])
+  assert.equal(wrong.headers.get('set-cookie'), null)
+  assert.equal((await s.call('POST', '/signin', { token: null, body: { token: 'nope' } })).status, 401)
+  assert.equal((await s.call('POST', '/signin', { token: null, body: { token: TOKENS.admin }, headers: { origin: 'https://evil.example' } })).status, 403)
+  const signed = await s.call('POST', '/signin', { token: null, body: { token: ` ${TOKENS.admin}\n` } })
+  assert.equal(signed.status, 204)
+  const set = signed.headers.get('set-cookie') ?? ''
+  assert.match(set, /^whip_session=[0-9a-f]{64}; Path=\/; HttpOnly; SameSite=Lax; Max-Age=\d+$/)
+  assert.equal(set.includes(TOKENS.admin), false, 'the cookie holds a value derived from the token, not the token')
+  const cookie = { cookie: `theme=dark; ${set.split(';')[0]}` }
+  const page = await s.call('GET', '/agents/1', { token: null, headers: { ...html, ...cookie } })
   assert.equal(page.status, 200)
   assert.match(page.text, /<title>Agent Whipper/)
-  const asset = await s.call('GET', '/assets/app.js', { token: null, headers: { authorization: basic } })
+  const asset = await s.call('GET', '/assets/app.js', { token: null, headers: cookie })
   assert.match(asset.type, /javascript/)
-  assert.equal((await s.call('GET', '/assets/..%2F..%2Fwhip.db', { token: null, headers: { authorization: basic } })).text.includes('SQLite'), false)
+  assert.equal((await s.call('GET', '/assets/..%2F..%2Fwhip.db', { token: null, headers: cookie })).text.includes('SQLite'), false)
+  assert.equal((await s.call('GET', '/api/board', { token: null, headers: cookie })).status, 200)
+  assert.equal((await s.call('GET', '/api/board', { token: null, headers: { cookie: 'whip_session=' + '0'.repeat(64) } })).status, 401)
+  // The cookie is the admin's only: it opens no agent call
+  assert.equal((await s.call('GET', '/agents/1', { token: null, headers: cookie })).status, 403)
+  const out = await s.call('POST', '/signout', { token: null, headers: cookie })
+  assert.deepEqual([out.status, out.headers.get('set-cookie')], [204, 'whip_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'])
+  assert.equal((await s.call('GET', '/signin', { token: null })).status, 405)
 
   // Restart: everything comes back from the database
   const before = (await s.call('GET', '/board')).text

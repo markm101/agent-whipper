@@ -273,9 +273,9 @@ function landBaseline(m: ModuleRec, j: JobRec, at: Ms) {
       : r.outcome === 'badCommit'
         ? `couldn't fetch the start commit: ${r.error ?? ''}`.trim()
         : r.tests && r.tests.passed < r.tests.total
-          ? `failed ${r.tests.total - r.tests.passed} tests`
+          ? `failed its tests on the start commit: ${r.tests.passed} of ${r.tests.total} passed`
           : 'measured nothing'
-  const next = m.state === 'pending' ? `${m.id} waits for new verifiers or an abandon.` : `${m.id} keeps its old baseline, which its new verifiers may not match.`
+  const next = m.state === 'pending' ? `${m.id} waits for an approved change request, or an abandon.` : `${m.id} keeps its old baseline, which its new verifiers may not match.`
   flag(m, 'baselineFailed', null, `The baseline job ${why}. ${next}`, at)
 }
 

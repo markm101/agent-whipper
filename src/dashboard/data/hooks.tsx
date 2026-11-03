@@ -35,6 +35,12 @@ export function useReview() {
   return source.review ? source.review.bind(source) : null
 }
 
+/** The source's sign-out, or null when it has none. */
+export function useSignOut() {
+  const source = useSource()
+  return source.signOut ? source.signOut.bind(source) : null
+}
+
 export function useAttemptDetail(agent: AgentId, module: ModuleId, attempt: AttemptId) {
   const source = useSource()
   return useSyncExternalStore(useSubscribe(source), () => source.attempt(agent, module, attempt))

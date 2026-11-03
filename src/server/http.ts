@@ -2,7 +2,8 @@
 // itself. Each route names the tokens it takes, parses its body, and hands
 // one call to the service. A rejection becomes 400, 404 or 409 with its code
 // and sentence. Browser page loads (Accept: text/html) get the dashboard, so
-// /agents/1 is a page in a browser and the board line for curl.
+// /agents/1 is a page in a browser and the board line for curl, and a browser
+// without the dashboard's cookie gets the sign-in page.
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { readFile, stat } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -16,6 +17,7 @@ import { verifierProblem } from './domain/rules.ts'
 import * as view from './domain/view.ts'
 import type { Service } from './service.ts'
 import type { Files } from './store.ts'
+import { SESSION, SIGNIN_PAGE, cookieOf, sessionCookie, sessionOf } from './signin.ts'
 import { filesProblem, merge, rebase, specOf, type ChangeBody, type VerifierUpload } from './verifiers.ts'
 
 export type Role = 'agent' | 'runner' | 'admin'
@@ -61,7 +63,7 @@ function decode(part: string): string {
   }
 }
 
-/** A browser request from another site. Browsers attach the dashboard's Basic password on their own, so these are refused. */
+/** A browser request from another site. Browsers attach the dashboard's cookie on their own, so these are refused. */
 function crossSite(req: IncomingMessage): boolean {
   const site = req.headers['sec-fetch-site']
   if (site !== undefined && site !== 'same-origin' && site !== 'none') return true
@@ -80,17 +82,18 @@ const missing = (what: string): Reply => json({ error: 'notFound', message: `The
 
 // Auth
 
-const CHALLENGE = 'Basic realm="Agent Whipper", charset="UTF-8"'
 const digest = (s: string) => createHash('sha256').update(s).digest()
 const same = (a: string, b: string) => timingSafeEqual(digest(a), digest(b))
 
-/** The roles the request's token grants: a bearer token, or the admin token as a Basic password for the browser. */
+/** The roles the request grants: a bearer token, a token as the Basic password, or the dashboard's cookie, which is the admin's. */
 function rolesOf(req: IncomingMessage, tokens: Tokens): Set<Role> {
   const header = req.headers.authorization ?? ''
   let token = /^Bearer\s+(.+)$/i.exec(header)?.[1]?.trim()
   const basic = /^Basic\s+(.+)$/i.exec(header)?.[1]
   if (!token && basic) token = Buffer.from(basic, 'base64').toString('utf8').split(':').slice(1).join(':')
   const roles = new Set<Role>()
+  const session = cookieOf(req, SESSION)
+  if (!token && session && same(session, sessionOf(tokens.admin))) roles.add('admin')
   if (!token) return roles
   for (const role of ['agent', 'runner', 'admin'] as const) if (same(token, tokens[role])) roles.add(role)
   return roles
@@ -345,6 +348,18 @@ const ROUTES: Route[] = [
   ],
   [
     'GET',
+    P('/agents/:id/project'),
+    ['agent'],
+    (s, { params: [agent] }) => {
+      const p = s.read((w, now) => {
+        const a = w.agents.find((x) => x.id === agent)
+        return a ? view.agentProjectOf(a, now) : null
+      })
+      return p ? json(p) : missing(`project for agent ${agent}. Create one with POST /agents/${agent}/projects`)
+    },
+  ],
+  [
+    'GET',
     P('/agents/:id'),
     ['agent'],
     (s, { params: [agent] }) => {
@@ -503,6 +518,17 @@ async function serveFile(dir: string, path: string): Promise<Reply & { body?: Bu
   return { status: 200, body, headers: { 'content-type': TYPES[extname(file)] ?? 'application/octet-stream', 'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache' } }
 }
 
+const CROSS_SITE = { error: 'crossSite', message: 'Calls that change something must come from the dashboard itself or from a client like curl.' }
+
+/** The dashboard's cookie for the admin token. Another token gets told which one it is. */
+function signIn(token: unknown, tokens: Tokens, req: IncomingMessage): Reply {
+  const given = typeof token === 'string' ? token.trim() : ''
+  if (given && same(given, tokens.admin)) return { status: 204, headers: { 'set-cookie': sessionCookie(req, sessionOf(tokens.admin)) } }
+  const other = given ? (['agent', 'runner'] as const).find((r) => same(given, tokens[r])) : undefined
+  const message = other ? `That's the ${other} token. The dashboard takes the admin token, WHIP_ADMIN_TOKEN.` : "That isn't the admin token. It's WHIP_ADMIN_TOKEN in the server's .env."
+  return json({ error: 'wrongToken', message }, 401)
+}
+
 export function createHandler({ service, tokens, dashboard }: HttpOptions) {
   return async function handle(req: IncomingMessage, res: ServerResponse) {
     const send = (r: Reply & { body?: Buffer }) => {
@@ -522,23 +548,28 @@ export function createHandler({ service, tokens, dashboard }: HttpOptions) {
       const method = req.method ?? 'GET'
       const roles = rolesOf(req, tokens)
       if (url.pathname === '/healthz') return send({ status: 200, text: 'ok\n' })
+      if (url.pathname === '/signin' || url.pathname === '/signout') {
+        if (method !== 'POST') return send(json({ error: 'badMethod', message: `${method} isn't allowed here.` }, 405))
+        if (crossSite(req)) return send(json(CROSS_SITE, 403))
+        if (url.pathname === '/signout') return send({ status: 204, headers: { 'set-cookie': sessionCookie(req, null) } })
+        return send(signIn(object(await readBody(req, LIMIT, false)).token, tokens, req))
+      }
 
       const page = method === 'GET' && dashboard !== null && ((req.headers.accept ?? '').includes('text/html') || url.pathname.startsWith('/assets/'))
       if (page) {
-        if (!roles.has('admin')) return send({ status: 401, text: 'The dashboard takes the admin token as the password.\n', headers: { 'www-authenticate': CHALLENGE } })
-        return send(await serveFile(dashboard, url.pathname))
+        if (roles.has('admin')) return send(await serveFile(dashboard, url.pathname))
+        if (url.pathname.startsWith('/assets/')) return send({ status: 401, text: 'Sign in to the dashboard first.\n' })
+        return send({ status: 401, body: Buffer.from(SIGNIN_PAGE), headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } })
       }
 
       const matches = ROUTES.filter(([, path]) => path.test(url.pathname))
       const route = matches.find(([m]) => m === method)
       if (!route) return send(matches.length ? json({ error: 'badMethod', message: `${method} isn't allowed here.` }, 405) : missing(`route ${url.pathname}`))
       const [, path, allowed, handler, limit = LIMIT, text = false] = route
-      if (method !== 'GET' && crossSite(req)) return send(json({ error: 'crossSite', message: 'Calls that change something must come from the dashboard itself or from a client like curl.' }, 403))
+      if (method !== 'GET' && crossSite(req)) return send(json(CROSS_SITE, 403))
       if (!allowed.some((r) => roles.has(r))) {
         const status = roles.size ? 403 : 401
-        // The challenge lets a browser resend the admin password it gave for another page
-        const headers = status === 401 ? { 'www-authenticate': CHALLENGE } : undefined
-        return send({ ...json({ error: status === 401 ? 'noToken' : 'wrongToken', message: `This call takes the ${allowed.join(' or ')} token.` }, status), ...(headers ? { headers } : {}) })
+        return send(json({ error: status === 401 ? 'noToken' : 'wrongToken', message: `This call takes the ${allowed.join(' or ')} token.` }, status))
       }
       const params = path.exec(url.pathname)!.slice(1).map(decode)
       send(await handler(service, { req, params, body: () => readBody(req, limit, text) }))

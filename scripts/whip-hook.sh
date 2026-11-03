@@ -2,7 +2,8 @@
 # Prints the agent's board line, for a Claude Code or Codex hook to add to
 # the agent's context. It never blocks the agent: if whip-server can't be
 # reached, it says so and exits 0, because one outage shouldn't stop a night.
-# Needs WHIP_URL, WHIP_AGENT_ID and WHIP_AGENT_TOKEN in the environment.
+# Needs WHIP_URL, WHIP_AGENT_ID and WHIP_AGENT_TOKEN, from the environment
+# or from an env file beside it, as scripts/connect.sh sets up in .whip/.
 #
 # With no argument it prints plain text, which both tools add to the context
 # only on SessionStart and UserPromptSubmit. Pass the hook event's name, such
@@ -11,6 +12,10 @@
 event=$1
 # Event names are letters only; anything else gets the plain line rather than broken JSON
 case "$event" in *[!A-Za-z]*) event= ;; esac
+here=$(dirname "$0")
+if { [ -z "$WHIP_URL" ] || [ -z "$WHIP_AGENT_ID" ] || [ -z "$WHIP_AGENT_TOKEN" ]; } && [ -f "$here/env" ]; then
+  . "$here/env"
+fi
 
 say() {
   if [ -z "$event" ]; then

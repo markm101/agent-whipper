@@ -1,7 +1,7 @@
 // The dashboard's data from whip-server. It polls GET /api/board, loads an
 // attempt's detail when a page asks for it, and reloads that detail when the
-// board shows the attempt has moved on. The browser sends the admin token it
-// was asked for when the page loaded.
+// board shows the attempt has moved on. The browser sends the cookie it got
+// at sign-in; once that stops working, the page reloads to the sign-in page.
 import type { AgentId, AttemptDetail, AttemptId, Board, ChangeId, ChangeReview, ModuleId } from '../../shared/api.ts'
 import type { BoardSource } from './source.ts'
 
@@ -13,6 +13,8 @@ export interface HttpOptions {
 
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { headers: { accept: 'application/json' } })
+  // Signed out, or the admin token changed
+  if (res.status === 401) location.reload()
   if (!res.ok) throw new Error(`${url} answered ${res.status}`)
   return (await res.json()) as T
 }
@@ -84,6 +86,10 @@ export async function createHttpSource({ every = 3000, base = '' }: HttpOptions 
       }
       const body = (await res.json().catch(() => null)) as { message?: string } | null
       return body?.message ?? `whip-server answered ${res.status}`
+    },
+    async signOut() {
+      await fetch(`${base}/signout`, { method: 'POST' }).catch(() => {})
+      location.reload()
     },
   }
 }

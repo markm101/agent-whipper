@@ -2,11 +2,13 @@ import { AgentPage } from './pages/AgentPage.tsx'
 import { AttemptPage } from './pages/AttemptPage.tsx'
 import { BoardPage } from './pages/BoardPage.tsx'
 import { NotFound } from './pages/NotFound.tsx'
+import { useSignOut } from './data/hooks.tsx'
 import { Link, usePathname } from './router.tsx'
 import { matchRoute } from './view/routes.ts'
 
 export function App() {
   const route = matchRoute(usePathname())
+  const signOut = useSignOut()
   return (
     <div className="app">
       <div className="app-bar">
@@ -16,6 +18,11 @@ export function App() {
           </span>
           Agent Whipper
         </Link>
+        {signOut && (
+          <button type="button" className="app-bar__action" onClick={() => signOut()}>
+            Sign out
+          </button>
+        )}
       </div>
       <main>
         {route.page === 'board' && <BoardPage />}

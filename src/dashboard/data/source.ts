@@ -15,4 +15,6 @@ export interface BoardSource {
   decide?(change: ChangeId, approve: boolean, note?: string): Promise<string | null>
   /** A change request's diff, for review. */
   review?(change: ChangeId): Promise<ChangeReview | null>
+  /** Forgets the dashboard's sign-in. */
+  signOut?(): Promise<void>
 }

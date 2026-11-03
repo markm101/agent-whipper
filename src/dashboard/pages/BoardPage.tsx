@@ -30,7 +30,9 @@ export function BoardPage() {
       />
       <div className="page-body">
         {board.agents.length === 0 ? (
-          <p className="empty">No agents yet. An agent appears here once it creates a project.</p>
+          <p className="empty">
+            No agents yet. An agent appears here once it creates a project. To connect one, run <code>sh scripts/connect.sh &lt;checkout&gt; &lt;agent id&gt;</code> in the agent-whipper folder.
+          </p>
         ) : (
           <div className="board-grid">
             {board.agents.map((a) => (

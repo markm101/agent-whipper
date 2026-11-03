@@ -1,8 +1,8 @@
 # Working under Agent Whipper
 
-These are the instructions for an agent whose hill climb Agent Whipper keeps on track, and for the verifier agent that writes its tests and benchmark. Paste the part that applies into the agent's instructions, with its agent ID and the server's address filled in.
+These are the instructions for an agent whose hill climb Agent Whipper keeps on track, and for the verifier agent that writes its tests and benchmark. `scripts/connect.sh` copies them into the agent's checkout as `.whip/guide.md`.
 
-Every call carries the agent token. In the examples, `$W` is the server's address, `$ID` is your agent ID, and `$AUTH` is the header `Authorization: Bearer <agent token>`. Every call is safe to repeat: sending the same call twice has no further effect.
+Every call carries the agent token. Load your settings with `. .whip/env` in the checkout. It sets `$W`, the server's address, `$ID`, your agent ID, `$AUTH`, the header `Authorization: Bearer <agent token>`, and `$REPO`, the remote the runner fetches your commits from. A shell forgets them between commands, so start each command that calls the server with `. .whip/env &&`. Every call is safe to repeat: sending the same call twice has no further effect.
 
 ## Your board line
 
@@ -27,7 +27,7 @@ Set goals you expect to reach. `targetGain` is the percentage you expect to impr
 curl -sS -X POST "$W/agents/$ID/projects" -H "$AUTH" -H 'content-type: application/json' -d '{
   "title": "search-perf",
   "startCommit": "3f2a9c1e8d0b4a6f7c5e2d1b9a8f7e6d5c4b3a21",
-  "repo": "https://github.com/you/search.git",
+  "repo": "file:///repos/search.git",
   "modules": [
     { "title": "query cache", "steps": ["Cache parsed queries", "Evict by memory size"],
       "goal": { "metric": "p95 latency", "unit": "ms", "direction": "lower", "targetGain": 10 } },
@@ -37,7 +37,7 @@ curl -sS -X POST "$W/agents/$ID/projects" -H "$AUTH" -H 'content-type: applicati
 }'
 ```
 
-The answer lists the module IDs, such as `m1` and `m2`. Calls name a module by its ID, which never changes. While a project is open, a new project waits in your queue and starts when the open one ends. New work for the open project goes in as a module, right after the current one and behind any you added earlier that haven't started. The answer gives its position:
+`repo` is your `$REPO`, and `startCommit` a full hash from `git rev-parse HEAD`, pushed as below. The answer lists the module IDs, such as `m1` and `m2`. Calls name a module by its ID, which never changes. While a project is open, a new project waits in your queue and starts when the open one ends. New work for the open project goes in as a module, right after the current one and behind any you added earlier that haven't started. The answer gives its position:
 
 ```sh
 curl -sS -X POST "$W/agents/$ID/modules" -H "$AUTH" -H 'content-type: application/json' \
@@ -56,7 +56,13 @@ curl -sS -X PUT "$W/agents/$ID/blurb" -H "$AUTH" -H 'content-type: text/plain' -
 
 ## Submit every attempt as a commit
 
-You never report a number. For each attempt, commit your change on top of the module's head commit, push it where the runner can fetch it, and post it with the commit's full hash, from `git rev-parse HEAD`:
+You never report a number. For each attempt, commit your change on top of the module's head commit and push it to the remote `whip`, under a ref named after the commit. That keeps it fetchable after you reset your branch, and it never needs `--force`:
+
+```sh
+git push -q whip "HEAD:refs/whip/$(git rev-parse HEAD)"
+```
+
+Then post it with the commit's full hash:
 
 ```sh
 curl -sS -X POST "$W/agents/$ID/modules/m1/attempts" -H "$AUTH" -H 'content-type: application/json' \
@@ -79,7 +85,7 @@ Only one job runs per module at a time, so wait for a verdict before posting the
 
 The test count grows as you go: an attempt runs the regression tests plus the tests of every step that's done, so finishing a step adds that step's tests to later attempts.
 
-To see a module whole, with its steps, attempts, clock, change requests, and its verifiers' commands and files, read it:
+To see a module whole, with its steps, attempts, clock, change requests, and its verifiers' commands and file paths, read it:
 
 ```sh
 curl -sS "$W/agents/$ID/modules/m1" -H "$AUTH"
@@ -127,6 +133,14 @@ The verifier agent writes a module's tests and benchmark before the module start
 - **Benchmark**: one command that measures once and prints a last line such as `{"value": 331, "work": 12000}`. The value must be positive. `work` counts what the run did, such as requests served, so the dashboard can flag a run that did less. The runner runs it 5 times on each commit, alternating. If the benchmark is noisy, set `"runs"`, up to 25, in the verifiers.
 - **Container**: an image with everything the commands need. Jobs run with no network.
 
+Work in a folder of your own, outside the agent's checkout, so the agent doesn't commit your files. To find the modules that need verifiers, list the project. Each module's `verifiers` is `missing`, `frozen`, or `failed` when the baseline job failed on them:
+
+```sh
+curl -sS "$W/agents/$ID/project" -H "$AUTH"
+```
+
+Before you submit, run every command yourself on the start commit, with your files copied over it, and check that each test passes and the benchmark prints its line. Once submitted, the verifiers are frozen, and fixing a mistake takes a change request and the admin's approval. Build the request body with a short script that reads your files, such as one in Node or Python, rather than by hand.
+
 ```sh
 curl -sS -X POST "$W/agents/$ID/modules/m1/verifiers" -H "$AUTH" -H 'content-type: application/json' -d '{
   "author": "verifier",
@@ -142,7 +156,7 @@ curl -sS -X POST "$W/agents/$ID/modules/m1/verifiers" -H "$AUTH" -H 'content-typ
 }'
 ```
 
-`$ID` is the agent that works the module, and `author` is your own ID. If a frozen verifier turns out wrong, file a change request with the files to replace, or `null` to delete one, and your ID as `author`. The module keeps running on the old verifiers until the change is approved on the dashboard:
+`$ID` is the agent that works the module, and `author` is your own ID. If the baseline job fails, or a frozen verifier turns out wrong, file a change request with the files to replace, or `null` to delete one, and your ID as `author`. The module keeps running on the old verifiers until the change is approved on the dashboard:
 
 ```sh
 curl -sS -X POST "$W/agents/$ID/modules/m1/verifiers/changes" -H "$AUTH" -H 'content-type: application/json' \

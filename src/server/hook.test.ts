@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -40,4 +43,22 @@ test('the hook prints the board line as plain text or as an event’s JSON, and 
   assert.match(await runHook(env), /^Agent Whipper: whip-server didn't answer .*Carry on/)
   assert.match(context(await runHook(env, 'PostToolUse'), 'PostToolUse'), /didn't answer/)
   assert.match(context(await runHook({}, 'PostToolBatch'), 'PostToolBatch'), /set WHIP_URL, WHIP_AGENT_ID and WHIP_AGENT_TOKEN/)
+})
+
+test('the hook reads its settings from the env file beside it, as connect.sh lays out .whip/', async () => {
+  const server = createServer((req, res) => {
+    const ok = req.url === '/agents/7' && req.headers.authorization === `Bearer ${TOKEN}`
+    res.writeHead(ok ? 200 : 401, { 'content-type': 'text/plain; charset=utf-8' }).end(ok ? 'agent 7: no open project\n' : 'no\n')
+  })
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+  const dir = mkdtempSync(join(tmpdir(), 'whip-hook-'))
+  try {
+    copyFileSync(hook, join(dir, 'hook.sh'))
+    writeFileSync(join(dir, 'env'), `WHIP_URL=http://127.0.0.1:${(server.address() as AddressInfo).port}\nWHIP_AGENT_ID=7\nWHIP_AGENT_TOKEN=${TOKEN}\n`)
+    const run = async () => (await promisify(execFile)('sh', [join(dir, 'hook.sh')], { env: { PATH: process.env.PATH ?? '' } })).stdout
+    assert.equal(await run(), 'agent 7: no open project\n')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+    await new Promise<void>((r) => server.close(() => r()))
+  }
 })

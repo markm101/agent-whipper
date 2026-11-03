@@ -168,15 +168,17 @@ Agent calls carry the agent ID in the path and the agent token. Runner calls car
 | `POST /agents/{id}/modules/{m}/verifiers/changes` | agent | Files a change request for a module's frozen verifiers |
 | `GET /agents/{id}/modules/{m}/verifiers/changes` | agent | Lists the module's change requests, with each decision's note |
 | `GET /agents/{id}/modules/{m}/verifiers/changes/{change}` | agent | Returns a change request's state and the admin's note |
-| `GET /agents/{id}/modules/{m}` | agent | Returns the module: its state, steps, goal, attempts, clock, change requests, and its verifiers' commands and files |
+| `GET /agents/{id}/modules/{m}` | agent | Returns the module: its state, steps, goal, attempts, clock, change requests, and its verifiers' commands and file paths |
 | `POST /agents/{id}/modules/{m}/attempts` | agent | Queues an attempt from its `attemptId`, `commit`, and `note` |
 | `GET /agents/{id}/modules/{m}/attempts/{attemptId}` | agent | Returns the attempt's job state, and once it is judged, its verdict with the runner's medians, gain, p and test counts, a sentence on why, the step's failed turns, the streak, and the module's state |
 | `GET /agents/{id}/modules/{m}/steps/{n}` | agent | Returns whether the step is done or skipped, and what its latest step check found |
 | `POST /agents/{id}/modules/{m}/steps/{n}/done` | agent | Queues a step check for the current step, and marks it done when the check passes |
 | `POST /agents/{id}/modules/{m}/abandon` | agent | Records the abandon reason for a pending, active, or stuck module. If the module has a win, it also takes the follow-up module. Returns the commit the next module starts from |
+| `GET /agents/{id}/project` | agent | Returns the agent's project in brief: each module's ID, state, steps, goal, and whether its verifiers are missing, frozen, or failed at the baseline, so a verifier agent can find the modules that need verifiers |
 | `GET /agents/{id}` | agent | Returns the agent's board line, or `no open project` before its first one |
 | `GET /board` | agent or admin | Returns every agent's board line as plain text |
-| `GET /` | admin | Serves the dashboard. A browser sends the admin token as the password, and any page load (`Accept: text/html`) gets the dashboard, so `/agents/1` is a page in a browser and the board line for `curl` |
+| `GET /` | admin | Serves the dashboard. Any page load (`Accept: text/html`) gets the dashboard, so `/agents/1` is a page in a browser and the board line for `curl`. A browser without the dashboard's cookie gets a sign-in page that asks for the admin token |
+| `POST /signin`, `POST /signout` | none | Trades the admin token for the dashboard's cookie, and clears it. The cookie holds an HMAC of the admin token, so changing the token signs every browser out |
 | `GET /api/board`, `GET /api/agents/{id}/modules/{m}/attempts/{a}` | admin | The dashboard's data: the board and an attempt's runs |
 | `GET /admin/changes/{change}` | admin | Returns a change request with each changed file before and after, for review |
 | `POST /admin/changes/{change}` | admin | Approves or rejects a change request, with an optional note for the agent |
@@ -196,7 +198,7 @@ A Claude Code or Codex hook calls `GET /agents/{id}` and adds the board line to 
 - SQLite through the built-in `node:sqlite`. `whip-server` is the only writer.
 - Self-hosted with one Docker Compose file and two services. `whip-server` runs the API, the dashboard, and the database. `whip-runner` claims jobs and starts a throwaway container for each one. The same file runs on a home machine or a VPS.
 - The database lives in a Docker volume that only `whip-server` mounts, outside any project folder an agent works in.
-- Commits live in a git remote that both the agents and the runner can reach.
+- Commits live in a git remote that both the agents and the runner can reach. `scripts/connect.sh` makes one per repo, a bare copy in a host folder the runner mounts, and the agent pushes each commit under a ref named after it, so a reset branch never makes a measured commit unreachable.
 - Benchmarks can run on their own CPU cores (`--cpuset-cpus`) when other work shares the machine.
 
 ## Not in v1

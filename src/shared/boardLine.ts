@@ -17,7 +17,12 @@ function status(m: Module, now: Date) {
   const s = m.status
   // A module whose turn it is knows the commit it starts from, which is where the agent's branch should be
   const from = m.bestCommit ? ` It starts from ${m.bestCommit.slice(0, 7)}.` : ''
-  if (s.state === 'pending') return s.waitingFor === 'turn' ? 'Not started.' : `Waiting for its ${s.waitingFor}.${from}`
+  if (s.state === 'pending') {
+    if (s.waitingFor === 'turn') return 'Not started.'
+    // Frozen verifiers it still waits for are ones its baseline failed on
+    if (s.waitingFor === 'verifiers' && m.verifiers.kind === 'frozen') return `Its baseline failed on its verifiers, so it waits for an approved change request.${from}`
+    return `Waiting for its ${s.waitingFor}.${from}`
+  }
   if (s.state === 'stuck') return 'Stuck, waiting for an abandon reason.'
   if (m.clock.kind === 'grace') return 'Time is up, 1 attempt left.'
   const left = minutesLeft(m.clock, now)
